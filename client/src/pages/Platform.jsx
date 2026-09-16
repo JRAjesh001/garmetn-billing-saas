@@ -6,13 +6,18 @@ import { Modal } from "../components/ui";
 // ================================================================
 // Platform console API helper
 // ================================================================
+// ================================================================
+// Platform console API helper
+// ================================================================
+const API_URL = import.meta.env.VITE_API_URL || "https://api.fillwithbill.com";
+
 async function pf(path, opts = {}) {
-  const res = await fetch(path, {
+  const res = await fetch(`${API_URL}${path}`, {
     headers: {
       "Content-Type": "application/json",
       ...(opts.headers || {}),
     },
-    credentials: "same-origin",
+    credentials: "include",
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
@@ -25,7 +30,6 @@ async function pf(path, opts = {}) {
 
   return data;
 }
-
 // ================================================================
 // Safe helpers
 // ================================================================
