@@ -1,34 +1,55 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { money, fmtDate, downloadCSV } from "../api";
-import { Modal } from "../components/ui";
 
 // ================================================================
-// Platform console API helper
+// API CONFIG
 // ================================================================
+
+const API_URL = import.meta.env.VITE_API_URL || "https://api.fillwithbill.com";
+
+// ================================================================
+// PLATFORM API HELPER
+// IMPORTANT: Do NOT use fetch("/api/...") here.
+// It must call api.fillwithbill.com.
+// ================================================================
+
 async function pf(path, opts = {}) {
-  const res = await fetch(path, {
+  const url = `${API_URL}${path}`;
+
+  console.log("PLATFORM API:", url);
+
+  const fetchOptions = {
+    ...opts,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       ...(opts.headers || {}),
     },
-    credentials: "same-origin",
-    ...opts,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  };
+
+  if (opts.body && typeof opts.body !== "string") {
+    fetchOptions.body = JSON.stringify(opts.body);
+  }
+
+  const res = await fetch(url, fetchOptions);
 
   const data = await res.json().catch(() => ({}));
 
+  console.log("PLATFORM RESPONSE:", path, data);
+
   if (!res.ok) {
-    throw new Error(data.error || `HTTP ${res.status}`);
+    throw new Error(
+      data?.error || data?.message || `Request failed (${res.status})`,
+    );
   }
 
   return data;
 }
 
 // ================================================================
-// Safe helpers
+// SAFE HELPERS
 // ================================================================
+
 const asArray = (value) => (Array.isArray(value) ? value : []);
 
 const asObject = (value) =>
@@ -39,2329 +60,1832 @@ const num = (value, fallback = 0) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
-// Normalize platform overview so the UI never crashes when
-// an API field is missing/null.
-function normalizeOverview(data) {
-  const raw = asObject(data);
+const money = (value) => {
+  return `₹${num(value).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+};
 
-  const tenants = asObject(raw.tenants);
-  const salesToday = asObject(raw.sales_today);
+const fmtDate = (value) => {
+  if (!value) return "-";
+
+  const d = new Date(value);
+
+  if (Number.isNaN(d.getTime())) {
+    return String(value);
+  }
+
+  return d.toLocaleString("en-IN");
+};
+
+// ================================================================
+// NORMALIZE OVERVIEW
+// ================================================================
+
+function normalizeOverview(raw) {
+  const data = asObject(raw);
 
   return {
-    ...raw,
-
-    gateway: raw.gateway || "—",
+    gateway: asObject(data.gateway),
 
     tenants: {
-      total: num(tenants.total),
-      active: num(tenants.active),
-      suspended: num(tenants.suspended),
+      total: num(data?.tenants?.total),
+      active: num(data?.tenants?.active),
+      suspended: num(data?.tenants?.suspended),
     },
 
-    mrr: num(raw.mrr),
+    mrr: num(data.mrr),
 
-    users: num(raw.users),
+    users: num(data.users),
 
-    signups_30: num(raw.signups_30),
+    signups_30: num(data.signups_30),
 
-    sales_30: num(raw.sales_30),
+    sales_30: num(data.sales_30),
 
     sales_today: {
-      count: num(salesToday.count),
-      total: num(salesToday.total),
+      count: num(data?.sales_today?.count),
+      total: num(data?.sales_today?.total),
     },
 
-    plans: asObject(raw.plans),
+    plans: asObject(data.plans),
 
-    signup_trend: asArray(raw.signup_trend),
+    signup_trend: asArray(data.signup_trend),
   };
 }
 
 // ================================================================
-// Plan badges
+// MAIN COMPONENT
 // ================================================================
-const PLAN_BADGE = {
-  trial: "warning text-dark",
-  starter: "info",
-  pro: "success",
-};
 
-const planBadge = (p) => PLAN_BADGE[p] || "primary";
-
-// ================================================================
-// Stat card
-// ================================================================
-function Stat({ icon, label, value, sub }) {
-  return (
-    <div className="card h-100">
-      <div className="card-body py-3">
-        <div className="small text-muted">
-          <i className={`bi bi-${icon} me-1`}></i>
-          {label}
-        </div>
-
-        <div className="fs-4 fw-bold">{value}</div>
-
-        {sub && <div className="small text-muted">{sub}</div>}
-      </div>
-    </div>
-  );
-}
-
-// ================================================================
-// Limit input
-// ================================================================
-function LimitInput({ value, onChange, placeholder }) {
-  return (
-    <input
-      type="number"
-      min="1"
-      className="form-control form-control-sm"
-      placeholder={placeholder || "Unlimited (blank)"}
-      value={value ?? ""}
-      onChange={(e) =>
-        onChange(
-          e.target.value === "" ? null : parseInt(e.target.value, 10) || 1,
-        )
-      }
-    />
-  );
-}
-
-// ================================================================
-// Platform
-// ================================================================
 export default function Platform() {
-  const [authed, setAuthed] = useState(null);
-  const [op, setOp] = useState(null);
+  const [operator, setOperator] = useState(null);
 
-  const [tab, setTab] = useState("overview");
-  const [sideOpen, setSideOpen] = useState(false);
-
-  const [ov, setOv] = useState(null);
+  const [overview, setOverview] = useState(normalizeOverview({}));
 
   const [tenants, setTenants] = useState([]);
   const [orders, setOrders] = useState([]);
   const [plans, setPlans] = useState([]);
+
   const [operators, setOperators] = useState([]);
+  const [settings, setSettings] = useState({});
 
-  const [psettings, setPsettings] = useState({});
+  const [activeTab, setActiveTab] = useState("overview");
 
-  const [q, setQ] = useState("");
-  const [fPlan, setFPlan] = useState("");
-  const [fStatus, setFStatus] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-  const [busy, setBusy] = useState("");
-  const [toastMsg, setToastMsg] = useState(null);
+  const [search, setSearch] = useState("");
 
-  // Modals
-  const [detail, setDetail] = useState(null);
-  const [planModal, setPlanModal] = useState(null);
-  const [planEdit, setPlanEdit] = useState(null);
-  const [opModal, setOpModal] = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const [selectedTenant, setSelectedTenant] = useState(null);
+  const [selectedPlan, setSelectedPlan] = useState(null);
 
   // ==============================================================
-  // Toast
+  // LOAD PLATFORM DATA
   // ==============================================================
-  const flash = (m, tone = "success") => {
-    setToastMsg({ m, tone });
 
-    setTimeout(() => {
-      setToastMsg(null);
-    }, 3500);
-  };
-
-  // ==============================================================
-  // Load platform data
-  // ==============================================================
   const load = useCallback(async () => {
     try {
+      setLoading(true);
+      setError("");
+
+      // ------------------------------------------------------------
+      // FIRST: PLATFORM AUTH
+      // ------------------------------------------------------------
+
       const me = await pf("/api/platform/me");
 
-      setOp(me);
+      console.log("PLATFORM ME:", me);
 
-      const [o, t, ords, pl] = await Promise.all([
-        pf("/api/platform/overview"),
-        pf("/api/platform/tenants"),
-        pf("/api/platform/orders"),
-        pf("/api/platform/plans"),
-      ]);
+      const currentOperator = me?.operator || me?.user || me;
 
-      // Normalize API responses
-      setOv(normalizeOverview(o));
-      setTenants(asArray(t));
-      setOrders(asArray(ords));
-      setPlans(asArray(pl));
-
-      if (me?.is_owner) {
-        const [ops, settings] = await Promise.all([
-          pf("/api/platform/operators"),
-          pf("/api/platform/settings"),
-        ]);
-
-        setOperators(asArray(ops));
-        setPsettings(asObject(settings));
-      } else {
-        setOperators([]);
-        setPsettings({});
+      if (!currentOperator) {
+        throw new Error("Platform operator session not found.");
       }
 
-      setAuthed(true);
-    } catch (error) {
-      console.error("Platform load error:", error);
-      setAuthed(false);
+      setOperator(currentOperator);
+
+      // ------------------------------------------------------------
+      // LOAD MAIN DATA
+      // ------------------------------------------------------------
+
+      const [overviewResponse, tenantsResponse, ordersResponse, plansResponse] =
+        await Promise.all([
+          pf("/api/platform/overview"),
+          pf("/api/platform/tenants"),
+          pf("/api/platform/orders"),
+          pf("/api/platform/plans"),
+        ]);
+
+      // ------------------------------------------------------------
+      // OVERVIEW
+      // ------------------------------------------------------------
+
+      setOverview(
+        normalizeOverview(
+          overviewResponse?.overview ||
+            overviewResponse?.data ||
+            overviewResponse,
+        ),
+      );
+
+      // ------------------------------------------------------------
+      // TENANTS
+      // ------------------------------------------------------------
+
+      const tenantRows =
+        tenantsResponse?.tenants ||
+        tenantsResponse?.data ||
+        tenantsResponse?.rows ||
+        tenantsResponse;
+
+      setTenants(asArray(tenantRows));
+
+      // ------------------------------------------------------------
+      // ORDERS
+      // ------------------------------------------------------------
+
+      const orderRows =
+        ordersResponse?.orders ||
+        ordersResponse?.data ||
+        ordersResponse?.rows ||
+        ordersResponse;
+
+      setOrders(asArray(orderRows));
+
+      // ------------------------------------------------------------
+      // PLANS
+      // ------------------------------------------------------------
+
+      const planRows =
+        plansResponse?.plans ||
+        plansResponse?.data ||
+        plansResponse?.rows ||
+        plansResponse;
+
+      setPlans(asArray(planRows));
+
+      // ------------------------------------------------------------
+      // OWNER-ONLY DATA
+      // ------------------------------------------------------------
+
+      if (
+        currentOperator?.role === "owner" ||
+        currentOperator?.role === "admin"
+      ) {
+        try {
+          const operatorsResponse = await pf("/api/platform/operators");
+
+          const operatorRows =
+            operatorsResponse?.operators ||
+            operatorsResponse?.data ||
+            operatorsResponse?.rows ||
+            operatorsResponse;
+
+          setOperators(asArray(operatorRows));
+        } catch (err) {
+          console.warn("Could not load platform operators:", err);
+          setOperators([]);
+        }
+
+        try {
+          const settingsResponse = await pf("/api/platform/settings");
+
+          setSettings(
+            asObject(
+              settingsResponse?.settings ||
+                settingsResponse?.data ||
+                settingsResponse,
+            ),
+          );
+        } catch (err) {
+          console.warn("Could not load platform settings:", err);
+          setSettings({});
+        }
+      }
+    } catch (err) {
+      console.error("PLATFORM LOAD ERROR:", err);
+
+      setError(err?.message || "Unable to load platform console.");
+    } finally {
+      setLoading(false);
     }
   }, []);
 
   // ==============================================================
-  // Initial load
+  // INITIAL LOAD
   // ==============================================================
+
   useEffect(() => {
     load();
   }, [load]);
 
   // ==============================================================
-  // Redirect when not authenticated
+  // FILTER TENANTS
   // ==============================================================
-  useEffect(() => {
-    if (authed === false) {
-      window.location.href = "/login";
-    }
-  }, [authed]);
 
-  // ==============================================================
-  // Generic action
-  // ==============================================================
-  const act = async (fn, key, msg) => {
-    setBusy(key);
+  const filteredTenants = useMemo(() => {
+    const rows = asArray(tenants);
 
-    try {
-      await fn();
+    const q = search.trim().toLowerCase();
 
-      await load();
-
-      if (detail) {
-        openDetail(detail.tenant.id);
-      }
-
-      if (msg) {
-        flash(msg);
-      }
-    } catch (ex) {
-      console.error(ex);
-      flash(ex.message || "Something went wrong", "danger");
+    if (!q) {
+      return rows;
     }
 
-    setBusy("");
-  };
+    return rows.filter((tenant) => {
+      const text = [
+        tenant?.name,
+        tenant?.business_name,
+        tenant?.shop_name,
+        tenant?.slug,
+        tenant?.username,
+        tenant?.email,
+        tenant?.phone,
+        tenant?.status,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return text.includes(q);
+    });
+  }, [tenants, search]);
 
   // ==============================================================
-  // Shop detail
+  // LOGOUT
   // ==============================================================
-  const openDetail = async (id) => {
-    setBusy("detail-" + id);
 
+  async function logout() {
     try {
-      const data = await pf(`/api/platform/tenants/${id}`);
-
-      setDetail({
-        ...asObject(data),
-
-        tenant: asObject(data?.tenant),
-
-        users: asArray(data?.users),
-
-        top_products: asArray(data?.top_products),
-
-        recent_sales: asArray(data?.recent_sales),
-
-        orders: asArray(data?.orders),
-
-        usage: {
-          users: num(data?.usage?.users),
-          products: num(data?.usage?.products),
-          sales: num(data?.usage?.sales),
-          revenue: num(data?.usage?.revenue),
-          stock_value: num(data?.usage?.stock_value),
-        },
+      await pf("/api/platform/logout", {
+        method: "POST",
       });
-    } catch (ex) {
-      console.error(ex);
-      flash(ex.message || "Unable to load shop details", "danger");
+    } catch (err) {
+      console.warn("Logout error:", err);
     }
 
-    setBusy("");
-  };
+    window.location.href = "/platform/login";
+  }
 
   // ==============================================================
-  // CSV export
+  // TAB
   // ==============================================================
-  const exportShops = () =>
-    downloadCSV("shops.csv", [
-      [
-        "ID",
-        "Shop",
-        "Owner Email",
-        "Phone",
-        "Plan",
-        "Status",
-        "GST",
-        "Users",
-        "Products",
-        "Sales",
-        "Revenue",
-        "Expiry",
-        "Created",
-      ],
 
-      ...asArray(tenants).map((t) => [
-        t.id,
-        t.shop_name,
-        t.owner_email,
-        t.phone || "",
-        t.plan,
-        t.status,
-        "",
-        t.users,
-        t.products,
-        t.sales,
-        t.revenue,
-        t.plan_expires_at ? String(t.plan_expires_at).slice(0, 10) : "",
-        t.created_at ? String(t.created_at).slice(0, 10) : "",
-      ]),
-    ]);
+  function changeTab(tab) {
+    setActiveTab(tab);
+    setSidebarOpen(false);
+  }
 
   // ==============================================================
-  // Loading
+  // LOADING
   // ==============================================================
-  if (authed === null) {
+
+  if (loading) {
     return (
-      <div className="text-center py-5">
-        <div className="spinner-border text-primary"></div>
+      <div style={styles.loadingPage}>
+        <div style={styles.spinner}></div>
 
-        <div className="small text-muted mt-2">Loading console…</div>
+        <h3 style={{ marginTop: 20 }}>Loading Platform Console</h3>
+
+        <p style={{ color: "#64748b" }}>Connecting to {API_URL}</p>
       </div>
     );
   }
 
   // ==============================================================
-  // Not authenticated
+  // ERROR
   // ==============================================================
-  if (authed === false) {
+
+  if (error) {
     return (
-      <div className="text-center py-5">
-        <div className="spinner-border text-primary"></div>
+      <div style={styles.errorPage}>
+        <div style={styles.errorCard}>
+          <div style={styles.errorIcon}>!</div>
 
-        <div className="small text-muted mt-2">Redirecting to login…</div>
-      </div>
-    );
-  }
+          <h2>Platform Console Error</h2>
 
-  // ==============================================================
-  // Safe filtered shops
-  // ==============================================================
-  const tenantList = asArray(tenants);
+          <p style={{ color: "#64748b" }}>{error}</p>
 
-  const filtered = tenantList.filter((t) => {
-    const searchText = `${t.shop_name || ""} ${
-      t.owner_email || ""
-    }`.toLowerCase();
+          <div style={styles.errorUrl}>
+            API:
+            <br />
+            {API_URL}
+          </div>
 
-    return (
-      (!q || searchText.includes(q.toLowerCase())) &&
-      (!fPlan || t.plan === fPlan) &&
-      (!fStatus || t.status === fStatus)
-    );
-  });
+          <div style={styles.errorActions}>
+            <button className="btn btn-primary" onClick={load}>
+              Retry
+            </button>
 
-  // ==============================================================
-  // Navigation
-  // ==============================================================
-  const NAV = [
-    {
-      label: "MONITOR",
-      items: [
-        ["overview", "speedometer2", "Overview"],
-        ["shops", "shop", `Shops (${tenantList.length})`],
-        ["payments", "credit-card-2-front", "Payments"],
-      ],
-    },
-
-    {
-      label: "MANAGE",
-      items: [
-        ["plans", "tags", "Subscription Plans"],
-
-        ...(op?.is_owner
-          ? [
-              ["operators", "person-badge", "Operators"],
-              ["settings", "gear", "Platform Settings"],
-            ]
-          : []),
-      ],
-    },
-  ];
-
-  // ==============================================================
-  // Active plans
-  // ==============================================================
-  const activePlans = asArray(plans).filter((p) => p?.is_active);
-
-  // ==============================================================
-  // Safe overview
-  // ==============================================================
-  const overview = normalizeOverview(ov);
-
-  const overviewTenants = overview.tenants;
-  const overviewSalesToday = overview.sales_today;
-  const overviewPlans = overview.plans;
-
-  // ==============================================================
-  // UI
-  // ==============================================================
-  return (
-    <div
-      style={{
-        display: "flex",
-        minHeight: "100vh",
-        background: "#eef1f6",
-      }}
-    >
-      {/* ==========================================================
-          TOAST
-      ========================================================== */}
-      {toastMsg && (
-        <div
-          className={`alert alert-${toastMsg.tone} position-fixed shadow-sm`}
-          style={{
-            top: 14,
-            right: 14,
-            zIndex: 2000,
-            minWidth: 260,
-          }}
-        >
-          {toastMsg.m}
+            <button
+              className="btn btn-outline-secondary"
+              onClick={() => (window.location.href = "/platform/login")}
+            >
+              Platform Login
+            </button>
+          </div>
         </div>
-      )}
+      </div>
+    );
+  }
 
+  // ==============================================================
+  // DASHBOARD
+  // ==============================================================
+
+  return (
+    <div className="platform-layout">
       {/* ==========================================================
           MOBILE BACKDROP
       ========================================================== */}
-      {sideOpen && (
+
+      {sidebarOpen && (
         <div
-          onClick={() => setSideOpen(false)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,.35)",
-            zIndex: 1040,
-          }}
+          className="platform-backdrop"
+          onClick={() => setSidebarOpen(false)}
         />
       )}
 
       {/* ==========================================================
           SIDEBAR
       ========================================================== */}
-      <aside
-        className={`console-side ${sideOpen ? "console-side-open" : ""}`}
-        style={{
-          width: 248,
-          background: "#0f1b31",
-          color: "#cbd5e1",
-          display: "flex",
-          flexDirection: "column",
-          position: "sticky",
-          top: 0,
-          height: "100vh",
-          flexShrink: 0,
-          zIndex: 1050,
-        }}
-      >
-        {/* Brand */}
-        <div
-          className="d-flex align-items-center gap-2 px-3 py-3"
-          style={{
-            borderBottom: "1px solid #24334f",
-          }}
-        >
-          <span
-            style={{
-              width: 34,
-              height: 34,
-              borderRadius: 9,
-              background: "linear-gradient(135deg,#6366f1,#8b5cf6)",
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <i className="bi bi-hdd-rack"></i>
-          </span>
+
+      <aside className={`platform-sidebar ${sidebarOpen ? "open" : ""}`}>
+        <div className="platform-brand">
+          <div className="brand-logo">FB</div>
 
           <div>
-            <div className="fw-bold text-white" style={{ lineHeight: 1.1 }}>
-              GarmentBill
-            </div>
+            <div className="brand-title">FillWithBill</div>
 
-            <div
-              className="small"
-              style={{
-                color: "#64748b",
-                fontSize: ".72rem",
-              }}
-            >
-              Platform Console
-            </div>
+            <div className="brand-subtitle">Platform Console</div>
           </div>
         </div>
 
-        {/* Navigation */}
-        <nav
-          style={{
-            flex: 1,
-            overflowY: "auto",
-            padding: ".75rem .6rem",
-          }}
-        >
-          {NAV.map((sec) => (
-            <div key={sec.label} className="mb-2">
-              <div
-                className="px-2 mb-1"
-                style={{
-                  fontSize: ".64rem",
-                  letterSpacing: 1,
-                  color: "#475569",
-                }}
-              >
-                {sec.label}
-              </div>
-
-              {sec.items.map(([key, icon, label]) => (
-                <button
-                  key={key}
-                  onClick={() => {
-                    setTab(key);
-                    setSideOpen(false);
-                  }}
-                  className="btn w-100 text-start mb-1 d-flex align-items-center gap-2"
-                  style={
-                    tab === key
-                      ? {
-                          background: "linear-gradient(90deg,#4f46e5,#6366f1)",
-                          color: "#fff",
-                          fontSize: ".86rem",
-                          borderRadius: 8,
-                        }
-                      : {
-                          color: "#94a3b8",
-                          fontSize: ".86rem",
-                          borderRadius: 8,
-                        }
-                  }
-                >
-                  <i className={`bi bi-${icon}`} style={{ width: 18 }}></i>
-
-                  {label}
-                </button>
-              ))}
-            </div>
-          ))}
-
-          <div
-            className="px-2 mt-3"
-            style={{
-              borderTop: "1px solid #24334f",
-              paddingTop: ".6rem",
-            }}
+        <div className="platform-nav">
+          <NavButton
+            active={activeTab === "overview"}
+            onClick={() => changeTab("overview")}
+            icon="▦"
           >
-            <Link
-              to="/"
-              className="btn w-100 text-start d-flex align-items-center gap-2"
-              style={{
-                color: "#94a3b8",
-                fontSize: ".86rem",
-              }}
-              onClick={() => setSideOpen(false)}
-            >
-              <i className="bi bi-box-arrow-in-left" style={{ width: 18 }}></i>
-              Back to app
-            </Link>
-          </div>
-        </nav>
+            Overview
+          </NavButton>
 
-        {/* Operator */}
-        <div
-          className="px-3 py-3"
-          style={{
-            borderTop: "1px solid #24334f",
-          }}
-        >
-          <div className="d-flex align-items-center gap-2">
-            <span
-              style={{
-                width: 30,
-                height: 30,
-                borderRadius: "50%",
-                background: "#6366f1",
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "#fff",
-                fontSize: ".8rem",
-              }}
-            >
-              <i className="bi bi-person-fill"></i>
-            </span>
+          <NavButton
+            active={activeTab === "shops"}
+            onClick={() => changeTab("shops")}
+            icon="▣"
+          >
+            Shops
+          </NavButton>
 
-            <div
-              style={{
-                minWidth: 0,
-                flex: 1,
-              }}
-            >
-              <div className="text-white small fw-semibold text-truncate">
-                {op?.name || "Operator"}
-              </div>
+          <NavButton
+            active={activeTab === "payments"}
+            onClick={() => changeTab("payments")}
+            icon="₹"
+          >
+            Payments
+          </NavButton>
 
-              <div
-                style={{
-                  fontSize: ".68rem",
-                  color: "#64748b",
-                }}
+          <NavButton
+            active={activeTab === "plans"}
+            onClick={() => changeTab("plans")}
+            icon="◇"
+          >
+            Plans
+          </NavButton>
+
+          {(operator?.role === "owner" || operator?.role === "admin") && (
+            <>
+              <NavButton
+                active={activeTab === "operators"}
+                onClick={() => changeTab("operators")}
+                icon="♙"
               >
-                {op?.is_owner ? "Owner" : "Operator"} · @{op?.username || ""}
-              </div>
+                Operators
+              </NavButton>
+
+              <NavButton
+                active={activeTab === "settings"}
+                onClick={() => changeTab("settings")}
+                icon="⚙"
+              >
+                Settings
+              </NavButton>
+            </>
+          )}
+        </div>
+
+        <div className="platform-sidebar-bottom">
+          <div className="operator-box">
+            <div className="operator-avatar">
+              {String(operator?.name || operator?.username || "O")
+                .charAt(0)
+                .toUpperCase()}
             </div>
 
-            <button
-              className="btn btn-sm btn-outline-light py-0 px-1"
-              title="Log out"
-              onClick={async () => {
-                try {
-                  await pf("/api/platform/logout", {
-                    method: "POST",
-                  });
-                } catch (e) {
-                  console.error(e);
-                }
+            <div className="operator-info">
+              <strong>
+                {operator?.name || operator?.username || "Operator"}
+              </strong>
 
-                window.location.href = "/login";
-              }}
-            >
-              <i className="bi bi-box-arrow-right"></i>
-            </button>
+              <small>{operator?.role || "operator"}</small>
+            </div>
           </div>
+
+          <button className="logout-button" onClick={logout}>
+            Logout
+          </button>
         </div>
       </aside>
 
       {/* ==========================================================
           MAIN
       ========================================================== */}
-      <main
-        style={{
-          flex: 1,
-          minWidth: 0,
-        }}
-      >
-        {/* Topbar */}
-        <header className="d-flex align-items-center gap-2 px-3 py-2 bg-white border-bottom">
+
+      <main className="platform-main">
+        {/* TOPBAR */}
+
+        <header className="platform-topbar">
           <button
-            className="btn btn-sm btn-outline-secondary d-lg-none"
-            onClick={() => setSideOpen(!sideOpen)}
+            className="mobile-menu-button"
+            onClick={() => setSidebarOpen(true)}
           >
-            <i className="bi bi-list"></i>
+            ☰
           </button>
 
-          <h6 className="mb-0 fw-bold">
-            {tab === "overview" && (
-              <>
-                <i className="bi bi-speedometer2 me-2 text-primary"></i>
-                Overview
-              </>
-            )}
+          <div>
+            <h1>
+              {activeTab === "overview" && "Platform Overview"}
 
-            {tab === "shops" && (
-              <>
-                <i className="bi bi-shop me-2 text-primary"></i>
-                Shops
-              </>
-            )}
+              {activeTab === "shops" && "Shop Management"}
 
-            {tab === "payments" && (
-              <>
-                <i className="bi bi-credit-card-2-front me-2 text-primary"></i>
-                Payments
-              </>
-            )}
+              {activeTab === "payments" && "Payments"}
 
-            {tab === "plans" && (
-              <>
-                <i className="bi bi-tags me-2 text-primary"></i>
-                Subscription Plans
-              </>
-            )}
+              {activeTab === "plans" && "Subscription Plans"}
 
-            {tab === "operators" && (
-              <>
-                <i className="bi bi-person-badge me-2 text-primary"></i>
-                Operator Accounts
-              </>
-            )}
+              {activeTab === "operators" && "Platform Operators"}
 
-            {tab === "settings" && (
-              <>
-                <i className="bi bi-gear me-2 text-primary"></i>
-                Platform Settings
-              </>
-            )}
-          </h6>
+              {activeTab === "settings" && "Platform Settings"}
+            </h1>
 
-          <span className="ms-auto small text-muted d-flex align-items-center gap-2">
-            Gateway:
-            <span
-              className={`badge badge-soft ${
-                overview.gateway === "razorpay" ? "bg-success" : "bg-secondary"
-              }`}
-            >
-              {overview.gateway}
-            </span>
-          </span>
+            <div className="breadcrumb">FillWithBill / Platform</div>
+          </div>
+
+          <div className="topbar-actions">
+            <button className="btn btn-outline-primary" onClick={load}>
+              ↻ Refresh
+            </button>
+
+            <Link to="/" className="btn btn-primary">
+              Main App
+            </Link>
+          </div>
         </header>
 
-        <div
-          style={{
-            padding: "1.1rem 1.25rem",
-            maxWidth: 1200,
-          }}
-        >
-          {/* ======================================================
-              OVERVIEW
-          ====================================================== */}
-          {tab === "overview" && (
-            <>
-              <div className="row g-3 mb-3">
-                {/* Shops */}
-                <div className="col-6 col-xl-3">
-                  <Stat
-                    icon="shop"
-                    label="Shops (tenants)"
-                    value={overviewTenants.total}
-                    sub={`${overviewTenants.active} active · ${overviewTenants.suspended} suspended`}
-                  />
-                </div>
+        {/* CONTENT */}
 
-                {/* MRR */}
-                <div className="col-6 col-xl-3">
-                  <Stat
-                    icon="currency-rupee"
-                    label="MRR"
-                    value={money(overview.mrr)}
-                    sub={Object.entries(overviewPlans)
-                      .map(([p, n]) => `${n} ${p}`)
-                      .join(" · ")}
-                  />
-                </div>
-
-                {/* Users */}
-                <div className="col-6 col-xl-3">
-                  <Stat
-                    icon="people"
-                    label="Total users"
-                    value={overview.users}
-                    sub={`${overview.signups_30} new shops in 30d`}
-                  />
-                </div>
-
-                {/* Sales */}
-                <div className="col-6 col-xl-3">
-                  <Stat
-                    icon="receipt"
-                    label="Sales (30d)"
-                    value={overview.sales_30}
-                    sub={`Today: ${overviewSalesToday.count} bills · ${money(
-                      overviewSalesToday.total,
-                    )}`}
-                  />
-                </div>
-              </div>
-
-              {/* Signup chart */}
-              <div className="card">
-                <div className="card-header fw-semibold small">
-                  <i className="bi bi-graph-up me-2 text-primary"></i>
-                  New shop signups — last 30 days
-                </div>
-
-                <div className="card-body">
-                  {overview.signup_trend.length === 0 ? (
-                    <div className="small text-muted">
-                      No signups recorded yet.
-                    </div>
-                  ) : (
-                    <div
-                      className="d-flex align-items-end gap-1"
-                      style={{ height: 120 }}
-                    >
-                      {overview.signup_trend.map((d, index) => {
-                        const count = num(d?.n);
-
-                        return (
-                          <div
-                            key={d?.d || index}
-                            className="text-center flex-fill"
-                            title={`${d?.d || ""}: ${count} shop(s)`}
-                          >
-                            <div
-                              style={{
-                                background: "#6366f1",
-                                borderRadius: 4,
-                                height: Math.max(6, count * 34),
-                              }}
-                            ></div>
-
-                            <div
-                              className="small text-muted"
-                              style={{
-                                fontSize: ".62rem",
-                              }}
-                            >
-                              {String(d?.d || "").slice(8)}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </>
+        <div className="platform-content">
+          {activeTab === "overview" && (
+            <OverviewTab
+              overview={overview}
+              tenants={tenants}
+              orders={orders}
+              plans={plans}
+              onRefresh={load}
+            />
           )}
 
-          {/* ======================================================
-              SHOPS
-          ====================================================== */}
-          {tab === "shops" && (
-            <div className="card">
-              <div className="card-header d-flex align-items-center gap-2 flex-wrap py-2">
-                <input
-                  className="form-control form-control-sm"
-                  style={{ maxWidth: 230 }}
-                  placeholder="Search shop / owner…"
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                />
-
-                <select
-                  className="form-select form-select-sm"
-                  style={{ maxWidth: 140 }}
-                  value={fPlan}
-                  onChange={(e) => setFPlan(e.target.value)}
-                >
-                  <option value="">All plans</option>
-
-                  {activePlans.map((p) => (
-                    <option key={p.plan_key} value={p.plan_key}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-
-                <select
-                  className="form-select form-select-sm"
-                  style={{ maxWidth: 130 }}
-                  value={fStatus}
-                  onChange={(e) => setFStatus(e.target.value)}
-                >
-                  <option value="">All status</option>
-                  <option value="active">Active</option>
-                  <option value="suspended">Suspended</option>
-                </select>
-
-                <span className="ms-auto d-flex gap-2">
-                  <button
-                    className="btn btn-sm btn-outline-success"
-                    onClick={exportShops}
-                  >
-                    <i className="bi bi-filetype-csv me-1"></i>
-                    CSV
-                  </button>
-
-                  <button
-                    className="btn btn-sm btn-outline-secondary"
-                    onClick={load}
-                  >
-                    <i className="bi bi-arrow-clockwise"></i>
-                  </button>
-                </span>
-              </div>
-
-              <div className="table-responsive">
-                <table className="table table-sm table-hover align-middle mb-0 small">
-                  <thead>
-                    <tr className="text-muted">
-                      <th>#</th>
-                      <th>Shop</th>
-                      <th>Owner</th>
-                      <th>Plan</th>
-                      <th>Status</th>
-                      <th className="text-center">Users</th>
-                      <th className="text-center">Products</th>
-                      <th className="text-end">Sales</th>
-                      <th className="text-end">Revenue</th>
-                      <th>Expiry</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {filtered.map((t) => (
-                      <tr
-                        key={t.id}
-                        style={{ cursor: "pointer" }}
-                        onClick={() => openDetail(t.id)}
-                      >
-                        <td className="text-muted">{t.id}</td>
-
-                        <td>
-                          <b>{t.shop_name}</b>
-                        </td>
-
-                        <td>
-                          {t.owner_email}
-                          <div className="text-muted">{t.phone}</div>
-                        </td>
-
-                        <td>
-                          <span
-                            className={`badge bg-${planBadge(
-                              t.plan,
-                            )} badge-soft text-capitalize`}
-                          >
-                            {t.plan}
-                          </span>
-                        </td>
-
-                        <td>
-                          <span
-                            className={`badge badge-soft ${
-                              t.status === "active" ? "bg-success" : "bg-danger"
-                            }`}
-                          >
-                            {t.status}
-                          </span>
-                        </td>
-
-                        <td className="text-center">{num(t.users)}</td>
-
-                        <td className="text-center">{num(t.products)}</td>
-
-                        <td className="text-end">{num(t.sales)}</td>
-
-                        <td className="text-end">{money(num(t.revenue))}</td>
-
-                        <td className="small text-muted">
-                          {t.plan_expires_at
-                            ? String(t.plan_expires_at).slice(0, 10)
-                            : "—"}
-                        </td>
-
-                        <td
-                          style={{
-                            whiteSpace: "nowrap",
-                          }}
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          {t.status === "active" ? (
-                            <button
-                              className="btn btn-sm btn-outline-danger me-1 py-0"
-                              disabled={busy === t.id}
-                              onClick={() =>
-                                act(
-                                  () =>
-                                    pf(
-                                      `/api/platform/tenants/${t.id}/suspend`,
-                                      {
-                                        method: "POST",
-                                      },
-                                    ),
-                                  t.id,
-                                  "Shop suspended",
-                                )
-                              }
-                            >
-                              Suspend
-                            </button>
-                          ) : (
-                            <button
-                              className="btn btn-sm btn-outline-success me-1 py-0"
-                              disabled={busy === t.id}
-                              onClick={() =>
-                                act(
-                                  () =>
-                                    pf(
-                                      `/api/platform/tenants/${t.id}/activate`,
-                                      {
-                                        method: "POST",
-                                      },
-                                    ),
-                                  t.id,
-                                  "Shop activated",
-                                )
-                              }
-                            >
-                              Activate
-                            </button>
-                          )}
-
-                          <button
-                            className="btn btn-sm btn-outline-primary py-0"
-                            onClick={() =>
-                              setPlanModal({
-                                tenant: t,
-                                plan: t.plan,
-                                days: 30,
-                              })
-                            }
-                          >
-                            Plan
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-
-                    {filtered.length === 0 && (
-                      <tr>
-                        <td
-                          colSpan={11}
-                          className="text-center text-muted py-4"
-                        >
-                          No shops match the filters.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+          {activeTab === "shops" && (
+            <ShopsTab
+              tenants={filteredTenants}
+              search={search}
+              setSearch={setSearch}
+              onOpen={(tenant) => setSelectedTenant(tenant)}
+            />
           )}
 
-          {/* ======================================================
-              PAYMENTS
-          ====================================================== */}
-          {tab === "payments" && (
-            <div className="card">
-              <div className="card-header fw-semibold small">
-                <i className="bi bi-credit-card-2-front me-2"></i>
-                Subscription payments (all shops)
-              </div>
+          {activeTab === "payments" && <PaymentsTab orders={orders} />}
 
-              {asArray(orders).length === 0 ? (
-                <div className="card-body small text-muted">
-                  No orders yet — payments appear here when shops subscribe.
-                </div>
-              ) : (
-                <div className="table-responsive">
-                  <table className="table table-sm align-middle mb-0 small">
-                    <thead>
-                      <tr className="text-muted">
-                        <th>#</th>
-                        <th>Shop</th>
-                        <th>Plan</th>
-                        <th>Amount</th>
-                        <th>Gateway</th>
-                        <th>Status</th>
-                        <th>Created</th>
-                        <th>Paid</th>
-                      </tr>
-                    </thead>
-
-                    <tbody>
-                      {asArray(orders).map((o) => (
-                        <tr key={o.id}>
-                          <td className="text-muted">{o.id}</td>
-
-                          <td>{o.shop_name}</td>
-
-                          <td className="text-capitalize">{o.plan}</td>
-
-                          <td>{money(num(o.amount) / 100)}</td>
-
-                          <td className="text-capitalize">{o.gateway}</td>
-
-                          <td>
-                            <span
-                              className={`badge badge-soft ${
-                                o.status === "paid"
-                                  ? "bg-success"
-                                  : o.status === "failed"
-                                    ? "bg-danger"
-                                    : "bg-secondary"
-                              }`}
-                            >
-                              {o.status}
-                            </span>
-                          </td>
-
-                          <td className="text-muted">
-                            {o.created_at
-                              ? String(o.created_at).slice(0, 16)
-                              : "—"}
-                          </td>
-
-                          <td className="text-muted">
-                            {o.paid_at ? String(o.paid_at).slice(0, 16) : "—"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+          {activeTab === "plans" && (
+            <PlansTab plans={plans} onOpen={(plan) => setSelectedPlan(plan)} />
           )}
 
-          {/* ======================================================
-              PLANS
-          ====================================================== */}
-          {tab === "plans" && (
-            <>
-              <div className="d-flex align-items-center mb-3">
-                <div className="small text-muted">
-                  Create and edit the plans shops can subscribe to. Changes
-                  apply immediately.
-                </div>
+          {activeTab === "operators" && <OperatorsTab operators={operators} />}
 
-                {op?.is_owner && (
-                  <button
-                    className="btn btn-primary btn-sm ms-auto"
-                    onClick={() =>
-                      setPlanEdit({
-                        plan_key: "",
-                        name: "",
-                        price: 499,
-                        users_limit: 2,
-                        products_limit: 200,
-                        reports: false,
-                        tagline: "",
-                        sort_order: 50,
-                      })
-                    }
-                  >
-                    <i className="bi bi-plus-circle me-1"></i>
-                    New plan
-                  </button>
-                )}
-              </div>
-
-              <div className="row g-3">
-                {asArray(plans).map((p) => (
-                  <div className="col-md-6 col-xl-4" key={p.id}>
-                    <div
-                      className="card h-100"
-                      style={!p.is_active ? { opacity: 0.6 } : {}}
-                    >
-                      <div className="card-body">
-                        <div className="d-flex align-items-center mb-1">
-                          <h6 className="mb-0">{p.name}</h6>
-
-                          <span
-                            className={`badge bg-${planBadge(
-                              p.plan_key,
-                            )} badge-soft ms-2 text-capitalize`}
-                          >
-                            {p.plan_key}
-                          </span>
-
-                          {!p.is_active && (
-                            <span className="badge bg-danger badge-soft ms-1">
-                              inactive
-                            </span>
-                          )}
-
-                          <span className="ms-auto fw-bold">
-                            ₹{num(p.price)}
-                            <span className="small text-muted fw-normal">
-                              /mo
-                            </span>
-                          </span>
-                        </div>
-
-                        <div
-                          className="small text-muted mb-2"
-                          style={{ minHeight: 32 }}
-                        >
-                          {p.tagline || "—"}
-                        </div>
-
-                        <ul className="list-unstyled small mb-2">
-                          <li>
-                            <i className="bi bi-people me-2 text-primary"></i>
-
-                            {p.users_limit
-                              ? `${p.users_limit} user logins`
-                              : "Unlimited users"}
-                          </li>
-
-                          <li>
-                            <i className="bi bi-tags me-2 text-primary"></i>
-
-                            {p.products_limit
-                              ? `${p.products_limit} products`
-                              : "Unlimited products"}
-                          </li>
-
-                          <li>
-                            <i
-                              className={`bi ${
-                                p.reports
-                                  ? "bi-check-circle-fill text-success"
-                                  : "bi-x-circle text-danger"
-                              } me-2`}
-                            ></i>
-                            Reports & GST analytics
-                          </li>
-
-                          {p.plan_key === "trial" && (
-                            <li>
-                              <i className="bi bi-hourglass me-2 text-warning"></i>
-                              {p.trial_days || 14}-day trial for new shops
-                            </li>
-                          )}
-                        </ul>
-
-                        <div className="d-flex align-items-center gap-2 border-top pt-2">
-                          <span className="small text-muted">
-                            {num(p.tenants_on_plan)} shop(s) on this plan
-                          </span>
-
-                          {op?.is_owner && (
-                            <span className="ms-auto d-flex gap-1">
-                              <button
-                                className="btn btn-sm btn-outline-primary py-0"
-                                onClick={() =>
-                                  setPlanEdit({
-                                    ...p,
-                                  })
-                                }
-                              >
-                                <i className="bi bi-pencil me-1"></i>
-                                Edit
-                              </button>
-
-                              {p.plan_key !== "trial" &&
-                                (p.is_active ? (
-                                  <button
-                                    className="btn btn-sm btn-outline-danger py-0"
-                                    disabled={busy === "plan" + p.id}
-                                    onClick={() =>
-                                      act(
-                                        () =>
-                                          pf(
-                                            `/api/platform/plans/${p.id}/toggle`,
-                                            {
-                                              method: "POST",
-                                            },
-                                          ),
-                                        "plan" + p.id,
-                                        "Plan deactivated",
-                                      )
-                                    }
-                                  >
-                                    Deactivate
-                                  </button>
-                                ) : (
-                                  <button
-                                    className="btn btn-sm btn-outline-success py-0"
-                                    disabled={busy === "plan" + p.id}
-                                    onClick={() =>
-                                      act(
-                                        () =>
-                                          pf(
-                                            `/api/platform/plans/${p.id}/toggle`,
-                                            {
-                                              method: "POST",
-                                            },
-                                          ),
-                                        "plan" + p.id,
-                                        "Plan activated",
-                                      )
-                                    }
-                                  >
-                                    Activate
-                                  </button>
-                                ))}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-
-          {/* ======================================================
-              OPERATORS
-          ====================================================== */}
-          {tab === "operators" && op?.is_owner && (
-            <div className="card">
-              <div className="card-header d-flex align-items-center">
-                <b className="small">Operator accounts</b>
-
-                <span className="small text-muted ms-2">
-                  — logins for the people who run this platform
-                </span>
-
-                <button
-                  className="btn btn-sm btn-primary ms-auto"
-                  onClick={() =>
-                    setOpModal({
-                      username: "",
-                      name: "",
-                      password: "",
-                    })
-                  }
-                >
-                  <i className="bi bi-person-plus me-1"></i>
-                  Create operator
-                </button>
-              </div>
-
-              <div className="table-responsive">
-                <table className="table table-sm align-middle mb-0 small">
-                  <thead>
-                    <tr className="text-muted">
-                      <th>#</th>
-                      <th>Username</th>
-                      <th>Name</th>
-                      <th>Role</th>
-                      <th>Status</th>
-                      <th>Last login</th>
-                      <th className="text-end">Actions</th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {asArray(operators).map((u) => (
-                      <tr key={u.id}>
-                        <td className="text-muted">{u.id}</td>
-
-                        <td>
-                          <b>{u.username}</b>
-                        </td>
-
-                        <td>{u.name}</td>
-
-                        <td>
-                          {u.is_owner ? (
-                            <span className="badge bg-primary badge-soft">
-                              owner
-                            </span>
-                          ) : (
-                            <span className="badge bg-secondary badge-soft">
-                              operator
-                            </span>
-                          )}
-                        </td>
-
-                        <td>
-                          {u.is_active ? (
-                            <span className="badge bg-success badge-soft">
-                              active
-                            </span>
-                          ) : (
-                            <span className="badge bg-danger badge-soft">
-                              disabled
-                            </span>
-                          )}
-                        </td>
-
-                        <td className="text-muted">
-                          {u.last_login
-                            ? String(u.last_login).slice(0, 16)
-                            : "never"}
-                        </td>
-
-                        <td
-                          className="text-end"
-                          style={{
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {!u.is_owner && u.id !== op.id && (
-                            <>
-                              <button
-                                className="btn btn-sm btn-outline-secondary me-1 py-0"
-                                onClick={() =>
-                                  setOpModal({
-                                    id: u.id,
-                                    username: u.username,
-                                    name: u.name,
-                                    password: "",
-                                  })
-                                }
-                              >
-                                <i className="bi bi-key me-1"></i>
-                                Edit
-                              </button>
-
-                              {u.is_active ? (
-                                <button
-                                  className="btn btn-sm btn-outline-danger me-1 py-0"
-                                  onClick={() =>
-                                    act(
-                                      () =>
-                                        pf(`/api/platform/operators/${u.id}`, {
-                                          method: "PUT",
-                                          body: {
-                                            is_active: 0,
-                                          },
-                                        }),
-                                      u.id,
-                                      "Operator disabled",
-                                    )
-                                  }
-                                >
-                                  Disable
-                                </button>
-                              ) : (
-                                <button
-                                  className="btn btn-sm btn-outline-success me-1 py-0"
-                                  onClick={() =>
-                                    act(
-                                      () =>
-                                        pf(`/api/platform/operators/${u.id}`, {
-                                          method: "PUT",
-                                          body: {
-                                            is_active: 1,
-                                          },
-                                        }),
-                                      u.id,
-                                      "Operator enabled",
-                                    )
-                                  }
-                                >
-                                  Enable
-                                </button>
-                              )}
-
-                              <button
-                                className="btn btn-sm btn-outline-danger py-0"
-                                onClick={async () => {
-                                  if (
-                                    !window.confirm(
-                                      `Delete operator "${u.username}"?`,
-                                    )
-                                  ) {
-                                    return;
-                                  }
-
-                                  await act(
-                                    () =>
-                                      pf(`/api/platform/operators/${u.id}`, {
-                                        method: "DELETE",
-                                      }),
-                                    u.id,
-                                    "Operator deleted",
-                                  );
-                                }}
-                              >
-                                <i className="bi bi-trash"></i>
-                              </button>
-                            </>
-                          )}
-
-                          {(u.is_owner || u.id === op.id) && (
-                            <span className="text-muted">—</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="card-footer small text-muted bg-white">
-                <i className="bi bi-shield-lock me-1"></i>
-                The owner account is provisioned from the server environment and
-                cannot be disabled or deleted.
-              </div>
-            </div>
-          )}
-
-          {/* ======================================================
-              SETTINGS
-          ====================================================== */}
-          {tab === "settings" && op?.is_owner && (
-            <div className="card" style={{ maxWidth: 640 }}>
-              <div className="card-header fw-semibold small">
-                <i className="bi bi-gear me-2"></i>
-                Defaults for newly created shops
-              </div>
-
-              <div className="card-body">
-                <div className="d-flex align-items-center justify-content-between py-2 border-bottom">
-                  <div>
-                    <div className="fw-semibold small">
-                      GST billing enabled by default
-                    </div>
-
-                    <div className="small text-muted">
-                      New shops start charging GST on invoices.
-                    </div>
-                  </div>
-
-                  <div className="form-check form-switch m-0">
-                    <input
-                      className="form-check-input"
-                      type="checkbox"
-                      style={{
-                        width: "2.4em",
-                        height: "1.2em",
-                      }}
-                      checked={psettings.default_gst_enabled !== "0"}
-                      onChange={(e) =>
-                        setPsettings({
-                          ...psettings,
-                          default_gst_enabled: e.target.checked ? "1" : "0",
-                        })
-                      }
-                    />
-                  </div>
-                </div>
-
-                <div className="py-3">
-                  <label className="form-label fw-semibold small mb-1">
-                    Default receipt footer message
-                  </label>
-
-                  <input
-                    className="form-control form-control-sm"
-                    value={psettings.default_receipt_footer || ""}
-                    onChange={(e) =>
-                      setPsettings({
-                        ...psettings,
-                        default_receipt_footer: e.target.value,
-                      })
-                    }
-                  />
-                </div>
-
-                <button
-                  className="btn btn-primary btn-sm"
-                  disabled={busy === "psettings"}
-                  onClick={() =>
-                    act(
-                      () =>
-                        pf("/api/platform/settings", {
-                          method: "PUT",
-                          body: psettings,
-                        }),
-                      "psettings",
-                      "Platform settings saved",
-                    )
-                  }
-                >
-                  {busy === "psettings" ? (
-                    <span className="spinner-border spinner-border-sm"></span>
-                  ) : (
-                    <>
-                      <i className="bi bi-check-lg me-1"></i>
-                      Save settings
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-          )}
+          {activeTab === "settings" && <SettingsTab settings={settings} />}
         </div>
       </main>
 
       {/* ==========================================================
-          SHOP DETAIL MODAL
+          TENANT MODAL
       ========================================================== */}
-      <Modal
-        show={!!detail}
-        onClose={() => setDetail(null)}
-        size="modal-xl"
-        title={
-          detail ? (
-            <>
-              <i className="bi bi-shop me-2"></i>
-              {detail.tenant?.shop_name || "Shop"}
-            </>
-          ) : (
-            ""
-          )
-        }
-        footer={
-          <button
-            className="btn btn-light btn-sm"
-            onClick={() => setDetail(null)}
-          >
-            Close
-          </button>
-        }
-      >
-        {detail && (
-          <div className="small">
-            <div className="d-flex flex-wrap gap-2 align-items-center mb-3">
-              <span
-                className={`badge bg-${planBadge(
-                  detail.tenant?.plan,
-                )} badge-soft text-capitalize fs-6`}
-              >
-                {detail.tenant?.plan || "—"}
-              </span>
 
-              <span
-                className={`badge badge-soft fs-6 ${
-                  detail.tenant?.status === "active"
-                    ? "bg-success"
-                    : "bg-danger"
-                }`}
-              >
-                {detail.tenant?.status || "—"}
-              </span>
-
-              <span className="text-muted">
-                {detail.tenant?.plan_expires_at ? (
-                  <>
-                    Valid till <b>{fmtDate(detail.tenant.plan_expires_at)}</b>
-                  </>
-                ) : (
-                  "No expiry set"
-                )}
-                {" · "}created{" "}
-                {detail.tenant?.created_at
-                  ? fmtDate(detail.tenant.created_at)
-                  : "—"}
-              </span>
-
-              <span className="ms-auto d-flex gap-2">
-                <button
-                  className="btn btn-sm btn-outline-primary"
-                  onClick={() =>
-                    setPlanModal({
-                      tenant: detail.tenant,
-                      plan: detail.tenant?.plan || "",
-                      days: 30,
-                    })
-                  }
-                >
-                  <i className="bi bi-pencil me-1"></i>
-                  Edit plan
-                </button>
-
-                <button
-                  className="btn btn-sm btn-outline-success"
-                  onClick={() =>
-                    act(
-                      () =>
-                        pf(`/api/platform/tenants/${detail.tenant.id}/extend`, {
-                          method: "POST",
-                          body: { days: 30 },
-                        }),
-                      "extend",
-                      "Subscription extended +30 days",
-                    )
-                  }
-                >
-                  <i className="bi bi-calendar-plus me-1"></i>
-                  Extend +30d
-                </button>
-
-                {detail.tenant?.status === "active" ? (
-                  <button
-                    className="btn btn-sm btn-outline-danger"
-                    onClick={() =>
-                      act(
-                        () =>
-                          pf(
-                            `/api/platform/tenants/${detail.tenant.id}/suspend`,
-                            {
-                              method: "POST",
-                            },
-                          ),
-                        "sus",
-                        "Shop suspended",
-                      )
-                    }
-                  >
-                    Suspend
-                  </button>
-                ) : (
-                  <button
-                    className="btn btn-sm btn-outline-success"
-                    onClick={() =>
-                      act(
-                        () =>
-                          pf(
-                            `/api/platform/tenants/${detail.tenant.id}/activate`,
-                            {
-                              method: "POST",
-                            },
-                          ),
-                        "act",
-                        "Shop activated",
-                      )
-                    }
-                  >
-                    Activate
-                  </button>
-                )}
-              </span>
-            </div>
-
-            {/* Usage */}
-            <div className="row g-2 mb-3 text-center">
-              {[
-                ["people", "Logins", detail.usage.users],
-                ["tags", "Products", detail.usage.products],
-                ["receipt", "Sales", detail.usage.sales],
-                ["currency-rupee", "Revenue", money(detail.usage.revenue)],
-                ["boxes", "Stock value", money(detail.usage.stock_value)],
-              ].map(([ic, lb, v]) => (
-                <div className="col" key={lb}>
-                  <div className="border rounded p-2">
-                    <div className="text-muted" style={{ fontSize: ".7rem" }}>
-                      <i className={`bi bi-${ic} me-1`}></i>
-                      {lb}
-                    </div>
-
-                    <div className="fw-bold">{v}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="row g-3">
-              {/* Users */}
-              <div className="col-lg-6">
-                <h6 className="text-muted">
-                  <i className="bi bi-people me-1"></i>
-                  User logins ({detail.users.length})
-                </h6>
-
-                <table className="table table-sm">
-                  <tbody>
-                    {detail.users.map((u) => (
-                      <tr key={u.id}>
-                        <td>
-                          <b>{u.name}</b>
-
-                          <div className="text-muted">@{u.username}</div>
-                        </td>
-
-                        <td>
-                          <span className="badge bg-secondary badge-soft text-capitalize">
-                            {u.role}
-                          </span>
-                        </td>
-
-                        <td className="text-muted">
-                          {u.is_active ? "active" : "disabled"}
-
-                          {u.last_login
-                            ? ` · login ${String(u.last_login).slice(0, 10)}`
-                            : ""}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-
-                {/* Top products */}
-                <h6 className="text-muted mt-3">
-                  <i className="bi bi-trophy me-1"></i>
-                  Top products
-                </h6>
-
-                {detail.top_products.length === 0 ? (
-                  <div className="text-muted">No sales yet.</div>
-                ) : (
-                  <table className="table table-sm">
-                    <tbody>
-                      {detail.top_products.map((p, i) => (
-                        <tr key={i}>
-                          <td>{p.name}</td>
-
-                          <td className="text-end">{p.qty} pcs</td>
-
-                          <td className="text-end">{money(p.revenue)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-
-              {/* Sales */}
-              <div className="col-lg-6">
-                <h6 className="text-muted">
-                  <i className="bi bi-receipt me-1"></i>
-                  Recent sales
-                </h6>
-
-                {detail.recent_sales.length === 0 ? (
-                  <div className="text-muted">No sales yet.</div>
-                ) : (
-                  <table className="table table-sm">
-                    <tbody>
-                      {detail.recent_sales.map((s) => (
-                        <tr key={s.id}>
-                          <td>
-                            {s.invoice_no}
-
-                            <div className="text-muted">
-                              {s.sale_date
-                                ? String(s.sale_date).slice(0, 16)
-                                : "—"}
-                            </div>
-                          </td>
-
-                          <td className="text-capitalize text-muted">
-                            {s.payment_method}
-                          </td>
-
-                          <td className="text-end fw-semibold">
-                            {money(num(s.total))}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-
-                <h6 className="text-muted mt-3">
-                  <i className="bi bi-credit-card-2-front me-1"></i>
-                  Subscription orders
-                </h6>
-
-                {detail.orders.length === 0 ? (
-                  <div className="text-muted">No payments yet.</div>
-                ) : (
-                  <table className="table table-sm">
-                    <tbody>
-                      {detail.orders.map((o) => (
-                        <tr key={o.id}>
-                          <td className="text-capitalize">
-                            {o.plan} · {money(num(o.amount) / 100)}
-                          </td>
-
-                          <td>
-                            <span
-                              className={`badge badge-soft ${
-                                o.status === "paid"
-                                  ? "bg-success"
-                                  : o.status === "failed"
-                                    ? "bg-danger"
-                                    : "bg-secondary"
-                              }`}
-                            >
-                              {o.status}
-                            </span>
-                          </td>
-
-                          <td className="text-muted text-end">
-                            {o.created_at
-                              ? String(o.created_at).slice(0, 10)
-                              : "—"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            </div>
-
-            <div className="border-top pt-2 mt-2 text-muted">
-              <i className="bi bi-geo-alt me-1"></i>
-              {detail.tenant?.address || "No address"}
-              {" · "}GSTIN: {detail.tenant?.gstin || "—"}
-              {" · "}Owner email: {detail.tenant?.owner_email || "—"}
-            </div>
-          </div>
-        )}
-      </Modal>
+      {selectedTenant && (
+        <Modal title="Shop Details" onClose={() => setSelectedTenant(null)}>
+          <TenantDetails tenant={selectedTenant} />
+        </Modal>
+      )}
 
       {/* ==========================================================
-          SET TENANT PLAN
+          PLAN MODAL
       ========================================================== */}
-      <Modal
-        show={!!planModal}
-        onClose={() => setPlanModal(null)}
-        size="modal-sm"
-        title="Set shop plan"
-        footer={
-          <>
-            <button
-              className="btn btn-light btn-sm"
-              onClick={() => setPlanModal(null)}
-            >
-              Cancel
-            </button>
 
-            <button
-              className="btn btn-primary btn-sm"
-              disabled={busy === "save-plan"}
-              onClick={() =>
-                act(
-                  async () => {
-                    await pf(
-                      `/api/platform/tenants/${planModal.tenant.id}/plan`,
-                      {
-                        method: "PUT",
-                        body: {
-                          plan: planModal.plan,
-                          days: planModal.days,
-                        },
-                      },
-                    );
-
-                    setPlanModal(null);
-                  },
-                  "save-plan",
-                  "Plan updated",
-                )
-              }
-            >
-              {busy === "save-plan" ? (
-                <span className="spinner-border spinner-border-sm"></span>
-              ) : (
-                "Apply"
-              )}
-            </button>
-          </>
-        }
-      >
-        {planModal && (
-          <div className="small">
-            <p className="mb-2">
-              Shop: <b>{planModal.tenant.shop_name}</b>
-            </p>
-
-            <label className="form-label fw-semibold">Plan</label>
-
-            <select
-              className="form-select form-select-sm mb-2"
-              value={planModal.plan}
-              onChange={(e) =>
-                setPlanModal({
-                  ...planModal,
-                  plan: e.target.value,
-                })
-              }
-            >
-              {activePlans.map((p) => (
-                <option key={p.plan_key} value={p.plan_key}>
-                  {p.name} — ₹{p.price}/mo
-                </option>
-              ))}
-            </select>
-
-            <label className="form-label fw-semibold">Term (days)</label>
-
-            <div className="d-flex gap-1 mb-1">
-              {[30, 90, 365].map((d) => (
-                <button
-                  key={d}
-                  className={`btn btn-sm flex-fill ${
-                    planModal.days === d
-                      ? "btn-primary"
-                      : "btn-outline-secondary"
-                  }`}
-                  onClick={() =>
-                    setPlanModal({
-                      ...planModal,
-                      days: d,
-                    })
-                  }
-                >
-                  {d}d
-                </button>
-              ))}
-            </div>
-
-            <input
-              type="number"
-              className="form-control form-control-sm"
-              min="1"
-              max="3650"
-              value={planModal.days}
-              onChange={(e) =>
-                setPlanModal({
-                  ...planModal,
-                  days: parseInt(e.target.value, 10) || 30,
-                })
-              }
-            />
-
-            <div className="form-text">
-              Expiry = now + term. For trials this is the trial end date.
-            </div>
-          </div>
-        )}
-      </Modal>
+      {selectedPlan && (
+        <Modal title="Plan Details" onClose={() => setSelectedPlan(null)}>
+          <PlanDetails plan={selectedPlan} />
+        </Modal>
+      )}
 
       {/* ==========================================================
-          PLAN CREATE / EDIT
+          CSS
       ========================================================== */}
-      <Modal
-        show={!!planEdit}
-        onClose={() => setPlanEdit(null)}
-        size="modal-md"
-        title={
-          planEdit?.id
-            ? `Edit plan — ${planEdit.name}`
-            : "Create subscription plan"
-        }
-        footer={
-          <>
-            <button
-              className="btn btn-light btn-sm"
-              onClick={() => setPlanEdit(null)}
-            >
-              Cancel
-            </button>
 
-            <button
-              className="btn btn-primary btn-sm"
-              disabled={busy === "plan-edit"}
-              onClick={() =>
-                act(
-                  async () => {
-                    if (planEdit.id) {
-                      await pf(`/api/platform/plans/${planEdit.id}`, {
-                        method: "PUT",
-                        body: planEdit,
-                      });
-                    } else {
-                      await pf("/api/platform/plans", {
-                        method: "POST",
-                        body: planEdit,
-                      });
-                    }
-
-                    setPlanEdit(null);
-                  },
-                  "plan-edit",
-                  planEdit?.id ? "Plan updated" : "Plan created",
-                )
-              }
-            >
-              {busy === "plan-edit" ? (
-                <span className="spinner-border spinner-border-sm"></span>
-              ) : planEdit?.id ? (
-                "Save changes"
-              ) : (
-                "Create plan"
-              )}
-            </button>
-          </>
-        }
-      >
-        {planEdit && (
-          <div className="small row g-2">
-            {!planEdit.id && (
-              <div className="col-md-5">
-                <label className="form-label fw-semibold">
-                  Plan key{" "}
-                  <span className="text-muted fw-normal">(permanent)</span>
-                </label>
-
-                <input
-                  className="form-control form-control-sm"
-                  placeholder="e.g. business"
-                  value={planEdit.plan_key}
-                  onChange={(e) =>
-                    setPlanEdit({
-                      ...planEdit,
-                      plan_key: e.target.value,
-                    })
-                  }
-                />
-              </div>
-            )}
-
-            <div className={planEdit.id ? "col-12" : "col-md-7"}>
-              <label className="form-label fw-semibold">Plan name</label>
-
-              <input
-                className="form-control form-control-sm"
-                placeholder="e.g. Business"
-                value={planEdit.name}
-                onChange={(e) =>
-                  setPlanEdit({
-                    ...planEdit,
-                    name: e.target.value,
-                  })
-                }
-              />
-            </div>
-
-            <div className="col-md-4">
-              <label className="form-label fw-semibold">Price ₹/month</label>
-
-              <input
-                type="number"
-                min="0"
-                className="form-control form-control-sm"
-                value={planEdit.price}
-                onChange={(e) =>
-                  setPlanEdit({
-                    ...planEdit,
-                    price: parseInt(e.target.value, 10) || 0,
-                  })
-                }
-              />
-            </div>
-
-            <div className="col-md-4">
-              <label className="form-label fw-semibold">User logins</label>
-
-              <LimitInput
-                value={planEdit.users_limit}
-                onChange={(v) =>
-                  setPlanEdit({
-                    ...planEdit,
-                    users_limit: v,
-                  })
-                }
-              />
-            </div>
-
-            <div className="col-md-4">
-              <label className="form-label fw-semibold">Products</label>
-
-              <LimitInput
-                value={planEdit.products_limit}
-                onChange={(v) =>
-                  setPlanEdit({
-                    ...planEdit,
-                    products_limit: v,
-                  })
-                }
-              />
-            </div>
-
-            {planEdit.plan_key === "trial" && (
-              <div className="col-md-4">
-                <label className="form-label fw-semibold">Trial days</label>
-
-                <input
-                  type="number"
-                  min="1"
-                  className="form-control form-control-sm"
-                  value={planEdit.trial_days || 14}
-                  onChange={(e) =>
-                    setPlanEdit({
-                      ...planEdit,
-                      trial_days: parseInt(e.target.value, 10) || 14,
-                    })
-                  }
-                />
-              </div>
-            )}
-
-            <div className="col-12">
-              <label className="form-label fw-semibold">Tagline</label>
-
-              <input
-                className="form-control form-control-sm"
-                placeholder="One-line description shown on pricing pages"
-                value={planEdit.tagline || ""}
-                onChange={(e) =>
-                  setPlanEdit({
-                    ...planEdit,
-                    tagline: e.target.value,
-                  })
-                }
-              />
-            </div>
-
-            <div className="col-md-6 d-flex align-items-center">
-              <div className="form-check form-switch">
-                <input
-                  className="form-check-input"
-                  type="checkbox"
-                  checked={!!planEdit.reports}
-                  onChange={(e) =>
-                    setPlanEdit({
-                      ...planEdit,
-                      reports: e.target.checked,
-                    })
-                  }
-                />
-
-                <label className="form-check-label">
-                  Reports & GST analytics included
-                </label>
-              </div>
-            </div>
-
-            <div className="col-md-6">
-              <label className="form-label fw-semibold">Sort order</label>
-
-              <input
-                type="number"
-                className="form-control form-control-sm"
-                value={planEdit.sort_order ?? 50}
-                onChange={(e) =>
-                  setPlanEdit({
-                    ...planEdit,
-                    sort_order: parseInt(e.target.value, 10) || 0,
-                  })
-                }
-              />
-            </div>
-          </div>
-        )}
-      </Modal>
-
-      {/* ==========================================================
-          OPERATOR CREATE / EDIT
-      ========================================================== */}
-      <Modal
-        show={!!opModal}
-        onClose={() => setOpModal(null)}
-        size="modal-sm"
-        title={
-          opModal?.id
-            ? `Edit operator — ${opModal.username}`
-            : "Create operator account"
-        }
-        footer={
-          <>
-            <button
-              className="btn btn-light btn-sm"
-              onClick={() => setOpModal(null)}
-            >
-              Cancel
-            </button>
-
-            <button
-              className="btn btn-primary btn-sm"
-              disabled={busy === "op-save"}
-              onClick={() =>
-                act(
-                  async () => {
-                    if (opModal.id) {
-                      const body = {};
-
-                      if (opModal.name) {
-                        body.name = opModal.name;
-                      }
-
-                      if (opModal.password) {
-                        body.password = opModal.password;
-                      }
-
-                      await pf(`/api/platform/operators/${opModal.id}`, {
-                        method: "PUT",
-                        body,
-                      });
-                    } else {
-                      await pf("/api/platform/operators", {
-                        method: "POST",
-                        body: opModal,
-                      });
-                    }
-
-                    setOpModal(null);
-                  },
-                  "op-save",
-                  opModal?.id ? "Operator updated" : "Operator created",
-                )
-              }
-            >
-              {busy === "op-save" ? (
-                <span className="spinner-border spinner-border-sm"></span>
-              ) : opModal?.id ? (
-                "Save"
-              ) : (
-                "Create"
-              )}
-            </button>
-          </>
-        }
-      >
-        {opModal && (
-          <div className="small">
-            {!opModal.id && (
-              <>
-                <label className="form-label fw-semibold">Username</label>
-
-                <input
-                  className="form-control form-control-sm mb-2"
-                  value={opModal.username}
-                  onChange={(e) =>
-                    setOpModal({
-                      ...opModal,
-                      username: e.target.value,
-                    })
-                  }
-                  placeholder="e.g. support1"
-                />
-              </>
-            )}
-
-            <label className="form-label fw-semibold">Name</label>
-
-            <input
-              className="form-control form-control-sm mb-2"
-              value={opModal.name}
-              onChange={(e) =>
-                setOpModal({
-                  ...opModal,
-                  name: e.target.value,
-                })
-              }
-              placeholder="Full name"
-            />
-
-            <label className="form-label fw-semibold">
-              {opModal.id ? "New password (leave blank to keep)" : "Password"}
-            </label>
-
-            <input
-              type="password"
-              className="form-control form-control-sm"
-              value={opModal.password}
-              onChange={(e) =>
-                setOpModal({
-                  ...opModal,
-                  password: e.target.value,
-                })
-              }
-              placeholder="Min 4 characters"
-            />
-          </div>
-        )}
-      </Modal>
-
-      {/* ==========================================================
-          MOBILE SIDEBAR CSS
-      ========================================================== */}
       <style>{`
-        @media (max-width: 991.98px) {
-          .console-side {
-            position: fixed !important;
-            left: 0;
-            top: 0;
-            bottom: 0;
-            height: 100vh !important;
-            transform: translateX(-100%);
-            transition: transform 0.25s ease;
+        * {
+          box-sizing: border-box;
+        }
+
+        body {
+          margin: 0;
+          background: #f8fafc;
+          font-family:
+            Inter,
+            Segoe UI,
+            system-ui,
+            -apple-system,
+            sans-serif;
+        }
+
+        .platform-layout {
+          min-height: 100vh;
+          background: #f8fafc;
+          color: #0f172a;
+        }
+
+        .platform-sidebar {
+          position: fixed;
+          left: 0;
+          top: 0;
+          bottom: 0;
+          width: 260px;
+          background: #0f172a;
+          color: white;
+          display: flex;
+          flex-direction: column;
+          z-index: 1050;
+        }
+
+        .platform-brand {
+          height: 76px;
+          padding: 18px 20px;
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          border-bottom: 1px solid rgba(255,255,255,.08);
+        }
+
+        .brand-logo {
+          width: 40px;
+          height: 40px;
+          border-radius: 10px;
+          background: #2563eb;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: 800;
+        }
+
+        .brand-title {
+          font-weight: 800;
+          font-size: 16px;
+        }
+
+        .brand-subtitle {
+          color: #94a3b8;
+          font-size: 11px;
+          margin-top: 2px;
+        }
+
+        .platform-nav {
+          padding: 18px 12px;
+          flex: 1;
+        }
+
+        .platform-nav-button {
+          width: 100%;
+          border: 0;
+          background: transparent;
+          color: #cbd5e1;
+          padding: 11px 13px;
+          margin-bottom: 5px;
+          border-radius: 9px;
+          text-align: left;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          font-size: 14px;
+        }
+
+        .platform-nav-button:hover {
+          background: rgba(255,255,255,.07);
+          color: white;
+        }
+
+        .platform-nav-button.active {
+          background: #2563eb;
+          color: white;
+        }
+
+        .nav-icon {
+          width: 20px;
+          text-align: center;
+        }
+
+        .platform-sidebar-bottom {
+          padding: 15px;
+          border-top: 1px solid rgba(255,255,255,.08);
+        }
+
+        .operator-box {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          margin-bottom: 12px;
+        }
+
+        .operator-avatar {
+          width: 36px;
+          height: 36px;
+          border-radius: 50%;
+          background: #334155;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: 700;
+        }
+
+        .operator-info {
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+        }
+
+        .operator-info strong {
+          font-size: 13px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .operator-info small {
+          color: #94a3b8;
+          text-transform: capitalize;
+        }
+
+        .logout-button {
+          width: 100%;
+          border: 1px solid rgba(255,255,255,.12);
+          background: rgba(255,255,255,.04);
+          color: #e2e8f0;
+          border-radius: 8px;
+          padding: 9px;
+          cursor: pointer;
+        }
+
+        .platform-main {
+          margin-left: 260px;
+          min-height: 100vh;
+        }
+
+        .platform-topbar {
+          min-height: 76px;
+          background: white;
+          border-bottom: 1px solid #e2e8f0;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 15px 25px;
+          gap: 15px;
+          position: sticky;
+          top: 0;
+          z-index: 100;
+        }
+
+        .platform-topbar h1 {
+          font-size: 21px;
+          margin: 0;
+          font-weight: 750;
+        }
+
+        .breadcrumb {
+          color: #64748b;
+          font-size: 12px;
+          margin-top: 3px;
+        }
+
+        .topbar-actions {
+          display: flex;
+          gap: 8px;
+        }
+
+        .mobile-menu-button {
+          display: none;
+          border: 0;
+          background: #f1f5f9;
+          border-radius: 8px;
+          padding: 9px 12px;
+          font-size: 20px;
+        }
+
+        .platform-content {
+          padding: 25px;
+        }
+
+        .dashboard-grid {
+          display: grid;
+          grid-template-columns:
+            repeat(4, minmax(0, 1fr));
+          gap: 15px;
+          margin-bottom: 20px;
+        }
+
+        .stat-card {
+          background: white;
+          border: 1px solid #e2e8f0;
+          border-radius: 12px;
+          padding: 18px;
+        }
+
+        .stat-label {
+          color: #64748b;
+          font-size: 12px;
+          margin-bottom: 7px;
+        }
+
+        .stat-value {
+          font-size: 25px;
+          font-weight: 800;
+          color: #0f172a;
+        }
+
+        .stat-sub {
+          color: #64748b;
+          font-size: 12px;
+          margin-top: 5px;
+        }
+
+        .content-card {
+          background: white;
+          border: 1px solid #e2e8f0;
+          border-radius: 12px;
+          overflow: hidden;
+          margin-bottom: 20px;
+        }
+
+        .card-header {
+          padding: 15px 18px;
+          border-bottom: 1px solid #e2e8f0;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 10px;
+        }
+
+        .card-header h3 {
+          margin: 0;
+          font-size: 16px;
+        }
+
+        .card-body {
+          padding: 18px;
+        }
+
+        .table-wrap {
+          overflow-x: auto;
+        }
+
+        .platform-table {
+          width: 100%;
+          border-collapse: collapse;
+          min-width: 700px;
+        }
+
+        .platform-table th {
+          background: #f8fafc;
+          color: #64748b;
+          font-size: 11px;
+          text-transform: uppercase;
+          letter-spacing: .04em;
+          text-align: left;
+          padding: 11px 14px;
+          border-bottom: 1px solid #e2e8f0;
+        }
+
+        .platform-table td {
+          padding: 13px 14px;
+          border-bottom: 1px solid #f1f5f9;
+          font-size: 13px;
+        }
+
+        .platform-table tr:last-child td {
+          border-bottom: 0;
+        }
+
+        .badge {
+          display: inline-flex;
+          align-items: center;
+          border-radius: 999px;
+          padding: 4px 9px;
+          font-size: 11px;
+          font-weight: 700;
+        }
+
+        .badge-success {
+          background: #dcfce7;
+          color: #166534;
+        }
+
+        .badge-warning {
+          background: #fef3c7;
+          color: #92400e;
+        }
+
+        .badge-danger {
+          background: #fee2e2;
+          color: #991b1b;
+        }
+
+        .badge-secondary {
+          background: #e2e8f0;
+          color: #475569;
+        }
+
+        .search-box {
+          border: 1px solid #cbd5e1;
+          border-radius: 8px;
+          padding: 9px 11px;
+          min-width: 240px;
+          outline: none;
+        }
+
+        .search-box:focus {
+          border-color: #2563eb;
+          box-shadow: 0 0 0 3px rgba(37,99,235,.1);
+        }
+
+        .empty-state {
+          padding: 45px 20px;
+          text-align: center;
+          color: #64748b;
+        }
+
+        .plan-grid {
+          display: grid;
+          grid-template-columns:
+            repeat(3, minmax(0, 1fr));
+          gap: 15px;
+        }
+
+        .plan-card {
+          border: 1px solid #e2e8f0;
+          border-radius: 12px;
+          padding: 18px;
+          background: white;
+        }
+
+        .plan-card h3 {
+          margin: 0 0 5px;
+        }
+
+        .plan-price {
+          font-size: 27px;
+          font-weight: 800;
+          margin: 12px 0;
+        }
+
+        .settings-grid {
+          display: grid;
+          grid-template-columns:
+            repeat(2, minmax(0, 1fr));
+          gap: 15px;
+        }
+
+        .setting-row {
+          display: flex;
+          justify-content: space-between;
+          gap: 15px;
+          padding: 12px 0;
+          border-bottom: 1px solid #f1f5f9;
+        }
+
+        .setting-key {
+          color: #64748b;
+          font-size: 13px;
+        }
+
+        .setting-value {
+          font-weight: 600;
+          font-size: 13px;
+          text-align: right;
+          word-break: break-word;
+        }
+
+        .modal-backdrop {
+          position: fixed;
+          inset: 0;
+          background: rgba(15,23,42,.55);
+          z-index: 2000;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 20px;
+        }
+
+        .modal-box {
+          width: min(700px, 100%);
+          max-height: 90vh;
+          overflow: auto;
+          background: white;
+          border-radius: 14px;
+          box-shadow: 0 20px 50px rgba(0,0,0,.25);
+        }
+
+        .modal-header {
+          padding: 17px 20px;
+          border-bottom: 1px solid #e2e8f0;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        }
+
+        .modal-header h3 {
+          margin: 0;
+        }
+
+        .modal-close {
+          border: 0;
+          background: #f1f5f9;
+          border-radius: 7px;
+          width: 34px;
+          height: 34px;
+          cursor: pointer;
+        }
+
+        .modal-body {
+          padding: 20px;
+        }
+
+        .detail-grid {
+          display: grid;
+          grid-template-columns:
+            repeat(2, minmax(0, 1fr));
+          gap: 15px;
+        }
+
+        .detail-item {
+          border: 1px solid #e2e8f0;
+          border-radius: 9px;
+          padding: 12px;
+        }
+
+        .detail-label {
+          color: #64748b;
+          font-size: 11px;
+          margin-bottom: 4px;
+        }
+
+        .detail-value {
+          font-weight: 650;
+          word-break: break-word;
+        }
+
+        .loadingPage,
+        .loading-page {
+          min-height: 100vh;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          background: #f8fafc;
+        }
+
+        .spinner {
+          width: 40px;
+          height: 40px;
+          border: 4px solid #e2e8f0;
+          border-top-color: #2563eb;
+          border-radius: 50%;
+          animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+          to {
+            transform: rotate(360deg);
+          }
+        }
+
+        .errorPage,
+        .error-page {
+          min-height: 100vh;
+          background: #f8fafc;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 20px;
+        }
+
+        .errorCard {
+          width: min(550px, 100%);
+          background: white;
+          border: 1px solid #e2e8f0;
+          border-radius: 14px;
+          padding: 30px;
+          text-align: center;
+          box-shadow: 0 10px 30px rgba(15,23,42,.08);
+        }
+
+        .errorIcon {
+          width: 50px;
+          height: 50px;
+          margin: auto;
+          border-radius: 50%;
+          background: #fee2e2;
+          color: #b91c1c;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 25px;
+          font-weight: 800;
+        }
+
+        .errorUrl {
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          padding: 12px;
+          border-radius: 8px;
+          text-align: left;
+          font-size: 12px;
+          word-break: break-all;
+          margin: 15px 0;
+        }
+
+        .errorActions {
+          display: flex;
+          justify-content: center;
+          gap: 8px;
+        }
+
+        .platform-backdrop {
+          display: none;
+        }
+
+        @media (max-width: 1100px) {
+          .dashboard-grid {
+            grid-template-columns:
+              repeat(2, minmax(0, 1fr));
           }
 
-          .console-side-open {
+          .plan-grid {
+            grid-template-columns:
+              repeat(2, minmax(0, 1fr));
+          }
+        }
+
+        @media (max-width: 991.98px) {
+          .platform-sidebar {
+            transform: translateX(-100%);
+            transition: transform .25s ease;
+          }
+
+          .platform-sidebar.open {
             transform: translateX(0);
+          }
+
+          .platform-backdrop {
+            display: block;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,.4);
+            z-index: 1040;
+          }
+
+          .platform-main {
+            margin-left: 0;
+          }
+
+          .mobile-menu-button {
+            display: block;
+          }
+
+          .platform-topbar {
+            padding: 12px 15px;
+          }
+
+          .platform-content {
+            padding: 15px;
+          }
+        }
+
+        @media (max-width: 700px) {
+          .dashboard-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .plan-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .settings-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .detail-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .topbar-actions .btn:first-child {
+            display: none;
+          }
+
+          .platform-topbar h1 {
+            font-size: 17px;
+          }
+
+          .search-box {
+            width: 100%;
+            min-width: 0;
+          }
+
+          .card-header {
+            align-items: stretch;
+            flex-direction: column;
           }
         }
       `}</style>
+    </div>
+  );
+}
+
+// ================================================================
+// NAV BUTTON
+// ================================================================
+
+function NavButton({ active, onClick, icon, children }) {
+  return (
+    <button
+      className={`platform-nav-button ${active ? "active" : ""}`}
+      onClick={onClick}
+    >
+      <span className="nav-icon">{icon}</span>
+
+      <span>{children}</span>
+    </button>
+  );
+}
+
+// ================================================================
+// OVERVIEW
+// ================================================================
+
+function OverviewTab({ overview, tenants, orders, plans }) {
+  const recentTenants = asArray(tenants).slice(0, 8);
+  const recentOrders = asArray(orders).slice(0, 8);
+
+  const activePlans = asArray(plans).filter(
+    (plan) => plan?.is_active !== 0 && plan?.is_active !== false,
+  );
+
+  return (
+    <>
+      <div className="dashboard-grid">
+        <StatCard
+          label="Total Shops"
+          value={overview?.tenants?.total ?? 0}
+          sub={`${overview?.tenants?.active ?? 0} active · ${
+            overview?.tenants?.suspended ?? 0
+          } suspended`}
+        />
+
+        <StatCard
+          label="Monthly Recurring Revenue"
+          value={money(overview?.mrr ?? 0)}
+          sub="Current platform MRR"
+        />
+
+        <StatCard
+          label="Total Users"
+          value={overview?.users ?? 0}
+          sub="Across all shops"
+        />
+
+        <StatCard
+          label="New Signups"
+          value={overview?.signups_30 ?? 0}
+          sub="Last 30 days"
+        />
+
+        <StatCard
+          label="Sales - 30 Days"
+          value={money(overview?.sales_30 ?? 0)}
+          sub="Platform sales"
+        />
+
+        <StatCard
+          label="Today's Bills"
+          value={overview?.sales_today?.count ?? 0}
+          sub={money(overview?.sales_today?.total ?? 0)}
+        />
+
+        <StatCard
+          label="Active Plans"
+          value={activePlans.length}
+          sub="Available subscription plans"
+        />
+
+        <StatCard
+          label="Payment Gateway"
+          value={overview?.gateway?.status || "Unknown"}
+          sub={overview?.gateway?.provider || "Payment gateway"}
+        />
+      </div>
+
+      <div className="content-card">
+        <div className="card-header">
+          <h3>Recent Shops</h3>
+        </div>
+
+        <div className="table-wrap">
+          {recentTenants.length === 0 ? (
+            <div className="empty-state">No shops found.</div>
+          ) : (
+            <table className="platform-table">
+              <thead>
+                <tr>
+                  <th>Shop</th>
+                  <th>Owner</th>
+                  <th>Status</th>
+                  <th>Plan</th>
+                  <th>Created</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {recentTenants.map((tenant, index) => (
+                  <tr key={tenant?.id ?? tenant?.tenant_id ?? index}>
+                    <td>
+                      <strong>
+                        {tenant?.name ||
+                          tenant?.business_name ||
+                          tenant?.shop_name ||
+                          "-"}
+                      </strong>
+                    </td>
+
+                    <td>
+                      {tenant?.owner_name ||
+                        tenant?.username ||
+                        tenant?.email ||
+                        "-"}
+                    </td>
+
+                    <td>
+                      <StatusBadge
+                        status={
+                          tenant?.status ||
+                          (tenant?.is_active ? "active" : "inactive")
+                        }
+                      />
+                    </td>
+
+                    <td>{tenant?.plan_name || tenant?.plan || "-"}</td>
+
+                    <td>{fmtDate(tenant?.created_at || tenant?.createdAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+
+      <div className="content-card">
+        <div className="card-header">
+          <h3>Recent Payments</h3>
+        </div>
+
+        <div className="table-wrap">
+          {recentOrders.length === 0 ? (
+            <div className="empty-state">No payment records found.</div>
+          ) : (
+            <table className="platform-table">
+              <thead>
+                <tr>
+                  <th>Order</th>
+                  <th>Shop</th>
+                  <th>Amount</th>
+                  <th>Status</th>
+                  <th>Date</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {recentOrders.map((order, index) => (
+                  <tr key={order?.id ?? order?.order_id ?? index}>
+                    <td>
+                      {order?.order_number ||
+                        order?.invoice_no ||
+                        order?.id ||
+                        "-"}
+                    </td>
+
+                    <td>{order?.tenant_name || order?.shop_name || "-"}</td>
+
+                    <td>
+                      <strong>
+                        {money(order?.amount ?? order?.total ?? 0)}
+                      </strong>
+                    </td>
+
+                    <td>
+                      <StatusBadge
+                        status={order?.status || order?.payment_status}
+                      />
+                    </td>
+
+                    <td>{fmtDate(order?.created_at || order?.createdAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ================================================================
+// SHOPS
+// ================================================================
+
+function ShopsTab({ tenants, search, setSearch, onOpen }) {
+  return (
+    <div className="content-card">
+      <div className="card-header">
+        <h3>Shops ({asArray(tenants).length})</h3>
+
+        <input
+          className="search-box"
+          placeholder="Search shop..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+      </div>
+
+      <div className="table-wrap">
+        {asArray(tenants).length === 0 ? (
+          <div className="empty-state">No shops found.</div>
+        ) : (
+          <table className="platform-table">
+            <thead>
+              <tr>
+                <th>Shop</th>
+                <th>Slug</th>
+                <th>Owner</th>
+                <th>Phone</th>
+                <th>Plan</th>
+                <th>Status</th>
+                <th>Created</th>
+                <th></th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {tenants.map((tenant, index) => (
+                <tr key={tenant?.id ?? tenant?.tenant_id ?? index}>
+                  <td>
+                    <strong>
+                      {tenant?.name ||
+                        tenant?.business_name ||
+                        tenant?.shop_name ||
+                        "-"}
+                    </strong>
+                  </td>
+
+                  <td>{tenant?.slug || "-"}</td>
+
+                  <td>
+                    {tenant?.owner_name ||
+                      tenant?.username ||
+                      tenant?.email ||
+                      "-"}
+                  </td>
+
+                  <td>{tenant?.phone || "-"}</td>
+
+                  <td>{tenant?.plan_name || tenant?.plan || "-"}</td>
+
+                  <td>
+                    <StatusBadge
+                      status={
+                        tenant?.status ||
+                        (tenant?.is_active ? "active" : "inactive")
+                      }
+                    />
+                  </td>
+
+                  <td>{fmtDate(tenant?.created_at || tenant?.createdAt)}</td>
+
+                  <td>
+                    <button
+                      className="btn btn-sm btn-outline-primary"
+                      onClick={() => onOpen(tenant)}
+                    >
+                      View
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ================================================================
+// PAYMENTS
+// ================================================================
+
+function PaymentsTab({ orders }) {
+  return (
+    <div className="content-card">
+      <div className="card-header">
+        <h3>Payments ({asArray(orders).length})</h3>
+      </div>
+
+      <div className="table-wrap">
+        {asArray(orders).length === 0 ? (
+          <div className="empty-state">No payments found.</div>
+        ) : (
+          <table className="platform-table">
+            <thead>
+              <tr>
+                <th>Order</th>
+                <th>Shop</th>
+                <th>Customer</th>
+                <th>Amount</th>
+                <th>Payment</th>
+                <th>Status</th>
+                <th>Date</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {orders.map((order, index) => (
+                <tr key={order?.id ?? order?.order_id ?? index}>
+                  <td>
+                    {order?.order_number ||
+                      order?.invoice_no ||
+                      order?.id ||
+                      "-"}
+                  </td>
+
+                  <td>{order?.tenant_name || order?.shop_name || "-"}</td>
+
+                  <td>{order?.customer_name || order?.customer || "-"}</td>
+
+                  <td>
+                    <strong>{money(order?.amount ?? order?.total ?? 0)}</strong>
+                  </td>
+
+                  <td>{order?.payment_method || order?.method || "-"}</td>
+
+                  <td>
+                    <StatusBadge
+                      status={order?.payment_status || order?.status}
+                    />
+                  </td>
+
+                  <td>{fmtDate(order?.created_at || order?.createdAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ================================================================
+// PLANS
+// ================================================================
+
+function PlansTab({ plans, onOpen }) {
+  const rows = asArray(plans);
+
+  return (
+    <>
+      {rows.length === 0 ? (
+        <div className="content-card">
+          <div className="empty-state">No subscription plans found.</div>
+        </div>
+      ) : (
+        <div className="plan-grid">
+          {rows.map((plan, index) => (
+            <div className="plan-card" key={plan?.id ?? index}>
+              <h3>{plan?.name || plan?.plan_name || "Plan"}</h3>
+
+              <div className="plan-price">
+                {money(plan?.price ?? plan?.monthly_price ?? 0)}
+                <small
+                  style={{
+                    fontSize: 12,
+                    color: "#64748b",
+                  }}
+                >
+                  /month
+                </small>
+              </div>
+
+              <p
+                style={{
+                  color: "#64748b",
+                  fontSize: 13,
+                }}
+              >
+                {plan?.description || "Subscription plan"}
+              </p>
+
+              <div
+                style={{
+                  marginBottom: 15,
+                }}
+              >
+                <StatusBadge
+                  status={
+                    plan?.is_active === false || plan?.is_active === 0
+                      ? "inactive"
+                      : "active"
+                  }
+                />
+              </div>
+
+              <button
+                className="btn btn-outline-primary w-100"
+                onClick={() => onOpen(plan)}
+              >
+                View Plan
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+// ================================================================
+// OPERATORS
+// ================================================================
+
+function OperatorsTab({ operators }) {
+  return (
+    <div className="content-card">
+      <div className="card-header">
+        <h3>Platform Operators ({asArray(operators).length})</h3>
+      </div>
+
+      <div className="table-wrap">
+        {asArray(operators).length === 0 ? (
+          <div className="empty-state">No platform operators found.</div>
+        ) : (
+          <table className="platform-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Username</th>
+                <th>Email</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>Created</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {operators.map((item, index) => (
+                <tr key={item?.id ?? item?.operator_id ?? index}>
+                  <td>{item?.name || "-"}</td>
+
+                  <td>{item?.username || "-"}</td>
+
+                  <td>{item?.email || "-"}</td>
+
+                  <td>{item?.role || "-"}</td>
+
+                  <td>
+                    <StatusBadge
+                      status={
+                        item?.status ||
+                        (item?.is_active ? "active" : "inactive")
+                      }
+                    />
+                  </td>
+
+                  <td>{fmtDate(item?.created_at || item?.createdAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ================================================================
+// SETTINGS
+// ================================================================
+
+function SettingsTab({ settings }) {
+  const entries = Object.entries(asObject(settings));
+
+  return (
+    <div className="content-card">
+      <div className="card-header">
+        <h3>Platform Settings</h3>
+      </div>
+
+      <div className="card-body">
+        {entries.length === 0 ? (
+          <div className="empty-state">No settings found.</div>
+        ) : (
+          entries.map(([key, value]) => (
+            <div className="setting-row" key={key}>
+              <div className="setting-key">{key}</div>
+
+              <div className="setting-value">
+                {typeof value === "object"
+                  ? JSON.stringify(value)
+                  : String(value ?? "-")}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ================================================================
+// STAT CARD
+// ================================================================
+
+function StatCard({ label, value, sub }) {
+  return (
+    <div className="stat-card">
+      <div className="stat-label">{label}</div>
+
+      <div className="stat-value">{value}</div>
+
+      <div className="stat-sub">{sub}</div>
+    </div>
+  );
+}
+
+// ================================================================
+// STATUS BADGE
+// ================================================================
+
+function StatusBadge({ status }) {
+  const value = String(status || "unknown").toLowerCase();
+
+  let cls = "badge-secondary";
+
+  if (
+    ["active", "paid", "success", "completed", "complete", "enabled"].includes(
+      value,
+    )
+  ) {
+    cls = "badge-success";
+  }
+
+  if (["pending", "trial", "processing", "warning"].includes(value)) {
+    cls = "badge-warning";
+  }
+
+  if (
+    [
+      "suspended",
+      "inactive",
+      "cancelled",
+      "canceled",
+      "failed",
+      "expired",
+      "disabled",
+    ].includes(value)
+  ) {
+    cls = "badge-danger";
+  }
+
+  return <span className={`badge ${cls}`}>{value}</span>;
+}
+
+// ================================================================
+// TENANT DETAILS
+// ================================================================
+
+function TenantDetails({ tenant }) {
+  const data = asObject(tenant);
+
+  const fields = [
+    ["ID", data.id],
+    ["Shop Name", data.name || data.business_name || data.shop_name],
+    ["Slug", data.slug],
+    ["Owner", data.owner_name || data.username || data.email],
+    ["Email", data.email],
+    ["Phone", data.phone],
+    ["Plan", data.plan_name || data.plan],
+    ["Status", data.status],
+    ["Created", fmtDate(data.created_at || data.createdAt)],
+  ];
+
+  return (
+    <div className="detail-grid">
+      {fields.map(([label, value]) => (
+        <div className="detail-item" key={label}>
+          <div className="detail-label">{label}</div>
+
+          <div className="detail-value">{value ?? "-"}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ================================================================
+// PLAN DETAILS
+// ================================================================
+
+function PlanDetails({ plan }) {
+  const data = asObject(plan);
+
+  const fields = [
+    ["ID", data.id],
+    ["Name", data.name || data.plan_name],
+    ["Price", money(data.price ?? data.monthly_price ?? 0)],
+    ["Description", data.description],
+    ["Billing Period", data.billing_period || data.interval || "monthly"],
+    [
+      "Status",
+      data.is_active === false || data.is_active === 0 ? "Inactive" : "Active",
+    ],
+  ];
+
+  return (
+    <div className="detail-grid">
+      {fields.map(([label, value]) => (
+        <div className="detail-item" key={label}>
+          <div className="detail-label">{label}</div>
+
+          <div className="detail-value">{value ?? "-"}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ================================================================
+// MODAL
+// ================================================================
+
+function Modal({ title, children, onClose }) {
+  return (
+    <div
+      className="modal-backdrop"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <div className="modal-box">
+        <div className="modal-header">
+          <h3>{title}</h3>
+
+          <button className="modal-close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+
+        <div className="modal-body">{children}</div>
+      </div>
     </div>
   );
 }
