@@ -2,11 +2,16 @@
     RewriteEngine On
     RewriteBase /
 
+    # Allow JavaScript, CSS, images, fonts, etc.
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: blob: https:; font-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' https://api.fillwithbill.com http://localhost:3000 ws://localhost:5173;"
+
+    # Don't rewrite existing files
     RewriteRule ^index\.html$ - [L]
 
-    RewriteCond %{REQUEST_FILENAME} !-f
-    RewriteCond %{REQUEST_FILENAME} !-d
-    RewriteCond %{REQUEST_FILENAME} !-l
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
 
-    RewriteRule . /index.html [L]
+    # React Router SPA fallback
+    RewriteRule ^ /index.html [L]
 </IfModule>

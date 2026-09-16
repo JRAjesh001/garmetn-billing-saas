@@ -188,7 +188,8 @@ export default function Layout() {
 
   return (
     <>
-      <aside className="sidebar">
+      <aside className={`sidebar ${sbOpen ? "show" : ""}`}>
+        {" "}
         <div className="brand">
           <div className="logo">
             <i className="bi bi-shop"></i>
