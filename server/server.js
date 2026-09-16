@@ -16,7 +16,7 @@ const { initDb, getPool } = require("./db");
 
 const allowedOrigins = [
   "http://localhost:5173",
-  "https://garment.fillwithbill.com",
+  "https://garmetns.fillwithbill.com/",
 ];
 
 const app = express();
