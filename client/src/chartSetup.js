@@ -7,6 +7,8 @@ import {
   BarElement,
   LineController,
   BarController,
+  DoughnutController,
+  ArcElement,
   Title,
   Tooltip,
   Legend,
@@ -21,8 +23,12 @@ ChartJS.register(
   BarElement,
   LineController,
   BarController,
+  DoughnutController,
+  ArcElement,
   Title,
   Tooltip,
   Legend,
   Filler,
 );
+
+ChartJS.defaults.font.family = '"Segoe UI", system-ui, sans-serif';
