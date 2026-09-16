@@ -14,27 +14,30 @@ const { PLANS } = require("./plans");
 const rzp = require("./razorpay");
 const { initDb, getPool } = require("./db");
 
-const allowedOrigins = [
-  "http://localhost:5173",
-  "https://garmetns.fillwithbill.com/",
-];
-
 const app = express();
 
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("Not allowed by CORS"));
-      }
-    },
-    credentials: true,
-  }),
-);
-
 app.set("trust proxy", true);
+
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://garmetns.fillwithbill.com",
+];
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    console.log("Request Origin:", origin);
+
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.log("CORS blocked:", origin);
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
 app.use(express.json({ limit: "2mb" }));
 
 // ---------------- Security headers ----------------
