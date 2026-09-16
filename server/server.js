@@ -173,7 +173,7 @@ async function getSessionUser(req) {
 function setSessionCookie(res, token) {
   res.setHeader(
     "Set-Cookie",
-    `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${SESSION_DAYS * 86400}`,
+    `${COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=${SESSION_DAYS * 86400}`,
   );
 }
 async function createSession(userId) {
