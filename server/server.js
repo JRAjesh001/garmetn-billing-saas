@@ -4,6 +4,7 @@
 // req.tenant.id. One admin per shop (owner); staff = manager/cashier.
 // ================================================================
 const express = require("express");
+const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
@@ -13,7 +14,26 @@ const { PLANS } = require("./plans");
 const rzp = require("./razorpay");
 const { initDb, getPool } = require("./db");
 
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://garment.fillwithbill.com",
+];
+
 const app = express();
+
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    credentials: true,
+  }),
+);
+
 app.set("trust proxy", true);
 app.use(express.json({ limit: "2mb" }));
 
@@ -324,11 +344,9 @@ app.post(
       } catch (e) {
         if (e.code === "ER_DUP_ENTRY") {
           await conn.rollback();
-          return res
-            .status(400)
-            .json({
-              error: "A shop with this email already exists — please log in",
-            });
+          return res.status(400).json({
+            error: "A shop with this email already exists — please log in",
+          });
         }
         throw e;
       }
@@ -818,12 +836,10 @@ app.post(
         .status(400)
         .json({ error: "Password must be at least 4 characters" });
     if (!["manager", "cashier"].includes(role)) {
-      return res
-        .status(400)
-        .json({
-          error:
-            "Each shop has exactly one admin (the owner). Staff can be Manager or Cashier.",
-        });
+      return res.status(400).json({
+        error:
+          "Each shop has exactly one admin (the owner). Staff can be Manager or Cashier.",
+      });
     }
     const plan = getPlan(req.tenant.plan);
     const pool = getPool();
@@ -832,11 +848,9 @@ app.post(
       [req.tenant.id],
     );
     if (plan.users && n + 1 > plan.users) {
-      return res
-        .status(403)
-        .json({
-          error: `The ${plan.name} plan allows ${plan.users} user(s). Upgrade to add more.`,
-        });
+      return res.status(403).json({
+        error: `The ${plan.name} plan allows ${plan.users} user(s). Upgrade to add more.`,
+      });
     }
     try {
       const [r] = await pool.execute(
@@ -1117,11 +1131,9 @@ app.delete(
       [req.params.id, req.tenant.id],
     );
     if (n > 0)
-      return res
-        .status(400)
-        .json({
-          error: `Cannot delete: ${n} product(s) still use this category`,
-        });
+      return res.status(400).json({
+        error: `Cannot delete: ${n} product(s) still use this category`,
+      });
     await pool.execute("DELETE FROM categories WHERE id=? AND tenant_id=?", [
       req.params.id,
       req.tenant.id,
@@ -1194,11 +1206,9 @@ app.post(
         [req.tenant.id],
       );
       if (n + 1 > plan.products)
-        return res
-          .status(403)
-          .json({
-            error: `The ${plan.name} plan allows ${plan.products} products. Upgrade to add more.`,
-          });
+        return res.status(403).json({
+          error: `The ${plan.name} plan allows ${plan.products} products. Upgrade to add more.`,
+        });
     }
     const b = req.body;
     if (!b.name?.trim())
@@ -1426,11 +1436,9 @@ app.delete(
       [req.params.id, req.tenant.id],
     );
     if (n > 0)
-      return res
-        .status(400)
-        .json({
-          error: `Cannot delete: ${n} purchase(s) reference this supplier`,
-        });
+      return res.status(400).json({
+        error: `Cannot delete: ${n} purchase(s) reference this supplier`,
+      });
     await pool.execute("DELETE FROM suppliers WHERE id=? AND tenant_id=?", [
       req.params.id,
       req.tenant.id,
@@ -1582,11 +1590,9 @@ app.delete(
         );
         if (p && p.stock < it.qty) {
           await conn.rollback();
-          return res
-            .status(400)
-            .json({
-              error: `Cannot remove: not enough stock of "${it.product_name}" to reverse`,
-            });
+          return res.status(400).json({
+            error: `Cannot remove: not enough stock of "${it.product_name}" to reverse`,
+          });
         }
       }
       for (const it of items)
@@ -1818,11 +1824,9 @@ app.put(
       }
       if (s.status !== "completed") {
         await conn.rollback();
-        return res
-          .status(400)
-          .json({
-            error: `Only completed sales can be returned (status: ${s.status})`,
-          });
+        return res.status(400).json({
+          error: `Only completed sales can be returned (status: ${s.status})`,
+        });
       }
       const [items] = await conn.query(
         "SELECT * FROM sale_items WHERE sale_id=?",
@@ -1901,11 +1905,9 @@ app.post(
       }
       if (p.stock + qty < 0) {
         await conn.rollback();
-        return res
-          .status(400)
-          .json({
-            error: `Cannot reduce below zero (current stock ${p.stock})`,
-          });
+        return res.status(400).json({
+          error: `Cannot reduce below zero (current stock ${p.stock})`,
+        });
       }
       await conn.execute("UPDATE products SET stock = stock + ? WHERE id=?", [
         qty,
@@ -1939,12 +1941,10 @@ app.get(
     let g = chk(req, "manager");
     if (deny(res, g)) return;
     if (!getPlan(req.tenant.plan).reports) {
-      return res
-        .status(403)
-        .json({
-          error:
-            "Reports & analytics are available on the Pro plan — please upgrade from the Billing page.",
-        });
+      return res.status(403).json({
+        error:
+          "Reports & analytics are available on the Pro plan — please upgrade from the Billing page.",
+      });
     }
     const { from, to } = req.query;
     const range = `DATE(s.sale_date) BETWEEN ? AND ?`;
@@ -2088,12 +2088,10 @@ app.post(
       !u ||
       !bcrypt.compareSync(String(password || "").trim(), u.password_hash)
     ) {
-      return res
-        .status(401)
-        .json({
-          error:
-            "Invalid operator username or password. The default owner login is platform / platform@123",
-        });
+      return res.status(401).json({
+        error:
+          "Invalid operator username or password. The default owner login is platform / platform@123",
+      });
     }
     if (!u.is_active)
       return res
@@ -2288,11 +2286,9 @@ app.post(
       .trim()
       .toLowerCase();
     if (!/^[a-z0-9_.@-]{3,60}$/.test(uname))
-      return res
-        .status(400)
-        .json({
-          error: "Username must be 3-60 chars (letters, numbers, . _ @ -)",
-        });
+      return res.status(400).json({
+        error: "Username must be 3-60 chars (letters, numbers, . _ @ -)",
+      });
     if (!password || String(password).length < 4)
       return res
         .status(400)
@@ -2413,11 +2409,9 @@ app.post(
         .status(400)
         .json({ error: "Plan key must be 2-30 chars (a-z, 0-9, - _)" });
     if (key === "trial")
-      return res
-        .status(400)
-        .json({
-          error: '"trial" is reserved — edit the built-in trial plan instead',
-        });
+      return res.status(400).json({
+        error: '"trial" is reserved — edit the built-in trial plan instead',
+      });
     if (!b.name?.trim())
       return res.status(400).json({ error: "Plan name is required" });
     const price = Math.max(0, parseInt(b.price) || 0);
@@ -2534,11 +2528,9 @@ app.post(
         [p.plan_key],
       );
       if (n > 0)
-        return res
-          .status(400)
-          .json({
-            error: `${n} shop(s) are on this plan — move them to another plan first`,
-          });
+        return res.status(400).json({
+          error: `${n} shop(s) are on this plan — move them to another plan first`,
+        });
     }
     await pool.execute(
       "UPDATE subscription_plans SET is_active = 1 - is_active WHERE id = ?",
