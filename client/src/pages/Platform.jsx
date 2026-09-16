@@ -345,8 +345,8 @@ export default function Platform() {
 
   if (loading) {
     return (
-      <div style={styles.loadingPage}>
-        <div style={styles.spinner}></div>
+      <div className="loading-page">
+        <div className="spinner"></div>
 
         <h3 style={{ marginTop: 20 }}>Loading Platform Console</h3>
 
@@ -354,28 +354,27 @@ export default function Platform() {
       </div>
     );
   }
-
   // ==============================================================
   // ERROR
   // ==============================================================
 
   if (error) {
     return (
-      <div style={styles.errorPage}>
-        <div style={styles.errorCard}>
-          <div style={styles.errorIcon}>!</div>
+      <div className="error-page">
+        <div className="errorCard">
+          <div className="errorIcon">!</div>
 
           <h2>Platform Console Error</h2>
 
           <p style={{ color: "#64748b" }}>{error}</p>
 
-          <div style={styles.errorUrl}>
+          <div className="errorUrl">
             API:
             <br />
             {API_URL}
           </div>
 
-          <div style={styles.errorActions}>
+          <div className="errorActions">
             <button className="btn btn-primary" onClick={load}>
               Retry
             </button>
