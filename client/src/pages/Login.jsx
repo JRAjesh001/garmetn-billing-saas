@@ -80,9 +80,7 @@ export default function Login() {
             <i className="bi bi-shop"></i>
           </div>
           <h4 className="mb-0 fw-bold">Garment Billing System</h4>
-          <div className="small opacity-75 mt-1">
-            React · Express.js · MySQL
-          </div>
+          <div className="small opacity-75 mt-1"></div>
         </div>
         <div className="card-body p-4">
           {error && (
