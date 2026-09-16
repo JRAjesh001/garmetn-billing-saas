@@ -436,12 +436,8 @@ export default function Platform() {
             <>
               <div className="row g-3 mb-3">
                 <div className="col-6 col-xl-3">
-                  <Stat
-                    icon="shop"
-                    label="Shops (tenants)"
-                    value={ov.tenants.total}
-                    sub={`${ov.tenants.active} active · ${ov.tenants.suspended} suspended`}
-                  />
+                  sub=
+                  {`Today: ${ov?.sales_today?.count ?? 0} bills · ${money(ov?.sales_today?.total ?? 0)}`}
                 </div>
                 <div className="col-6 col-xl-3">
                   <Stat
